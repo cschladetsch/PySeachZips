@@ -470,27 +470,108 @@ class VideoArchiveScanner:
             logger.warning(f"Failed to hash ZIP file {zip_path}: {e}")
             return None
     
-    def scan_zip_for_videos(self, zip_path: str, all_files: bool = False) -> List[Tuple[str, int, str, Optional[str]]]:
-        """Scan a zip file for target files and return (name, size, path_in_zip, hash) tuples"""
+    def scan_zip_for_videos(self, zip_path: str, all_files: bool = False, progress_callback=None) -> List[Tuple[str, int, str, Optional[str]]]:
+        """Scan a zip file for target files and return (name, size, path_in_zip, None) tuples"""
         target_files = []
+        files_scanned = 0
+        start_time = time.time()
+        last_heartbeat = start_time
+        heartbeat_interval = 2  # seconds
         
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_file:
+                total_files = len(zip_file.infolist())
+                
+                # Show initial status for large zip files
+                if progress_callback and total_files > 1000:
+                    progress_callback(f"Scanning large zip ({total_files:,} files)...")
+                
                 for file_info in zip_file.infolist():
+                    files_scanned += 1
+                    current_time = time.time()
+                    
+                    # Show heartbeat for long operations
+                    if progress_callback and current_time - last_heartbeat >= heartbeat_interval:
+                        elapsed = current_time - start_time
+                        if total_files > 1000:
+                            progress_callback(f"Scanned {files_scanned:,}/{total_files:,} files ({elapsed:.1f}s)...")
+                        else:
+                            progress_callback(f"Processing... {elapsed:.1f}s elapsed")
+                        last_heartbeat = current_time
+                    
                     if not file_info.is_dir() and self.is_target_file(file_info.filename, all_files):
-                        file_hash = self.calculate_file_hash(zip_path, file_info.filename)
                         target_files.append((
                             os.path.basename(file_info.filename),
                             file_info.file_size,
                             file_info.filename,
-                            file_hash
+                            None  # No hashing
                         ))
+                
+                # Final status
+                if progress_callback:
+                    elapsed = time.time() - start_time
+                    if target_files:
+                        progress_callback(f"Found {len(target_files)} target files in {elapsed:.1f}s")
+                    else:
+                        progress_callback(f"No target files found ({files_scanned:,} files scanned in {elapsed:.1f}s)")
+                    
         except (zipfile.BadZipFile, PermissionError, OSError) as e:
             logger.warning(f"Cannot read zip file {zip_path}: {e}")
             return []
         
         return target_files
     
+    def get_drive_info(self, drive_path: str) -> tuple:
+        """Get drive label and size information"""
+        try:
+            # Get drive size using shutil.disk_usage
+            import shutil
+            total, used, free = shutil.disk_usage(drive_path)
+            total_gb = total / (1024**3)
+            
+            # Get volume label
+            label = "Unknown"
+            if platform.system() == 'Windows':
+                try:
+                    import win32api
+                    volume_info = win32api.GetVolumeInformation(drive_path)
+                    label = volume_info[0] if volume_info[0] else "No Label"
+                except:
+                    pass
+            else:
+                # For Unix-like systems
+                if drive_path.startswith('/mnt/') and len(drive_path.split('/')) == 3:
+                    # WSL Windows drive
+                    drive_letter = drive_path.split('/')[-1].upper()
+                    try:
+                        import subprocess
+                        result = subprocess.run(
+                            ['powershell.exe', '-Command', f'(Get-Volume -DriveLetter {drive_letter}).FileSystemLabel'],
+                            capture_output=True, text=True, timeout=3
+                        )
+                        if result.returncode == 0 and result.stdout.strip():
+                            label = result.stdout.strip()
+                        else:
+                            label = f"Drive {drive_letter}"
+                    except:
+                        label = f"Drive {drive_letter}"
+                else:
+                    # Try to get mount info for Linux
+                    try:
+                        import subprocess
+                        result = subprocess.run(['findmnt', '-n', '-o', 'LABEL', drive_path], 
+                                              capture_output=True, text=True, timeout=2)
+                        if result.returncode == 0 and result.stdout.strip():
+                            label = result.stdout.strip()
+                        else:
+                            label = drive_path.split('/')[-1] or "Root"
+                    except:
+                        label = drive_path.split('/')[-1] or "Root"
+            
+            return label, total_gb
+        except Exception:
+            return "Unknown", 0.0
+
     def get_drive_letter(self, path: str) -> str:
         """Extract drive letter or mount point from a path"""
         if platform.system() == 'Windows':
@@ -511,10 +592,13 @@ class VideoArchiveScanner:
                     return part
             return '/'
     
-    def insert_zip_data(self, zip_path: str, video_files: List[Tuple[str, int, str, Optional[str]]]) -> str:
+    def insert_zip_data(self, zip_path: str, video_files: List[Tuple[str, int, str, Optional[str]]], heartbeat_callback=None) -> str:
         """Insert zip file and its video files into the database with enhanced data"""
         if not video_files:
             return None
+        
+        if heartbeat_callback:
+            heartbeat_callback("Starting database insertion...")
         
         zip_uuid = str(uuid.uuid4())
         drive_letter = self.get_drive_letter(zip_path)
@@ -529,11 +613,14 @@ class VideoArchiveScanner:
             stat_info = os.stat(zip_path)
             zip_file_size = stat_info.st_size
             zip_last_modified = datetime.fromtimestamp(stat_info.st_mtime)
-            zip_hash = self.calculate_zip_hash(zip_path)
+            zip_hash = None  # Disable ZIP hashing for performance
         except OSError as e:
             logger.warning(f"Could not get metadata for {zip_path}: {e}")
         
         cursor = self.connection.cursor()
+        
+        if heartbeat_callback:
+            heartbeat_callback("Inserting ZIP metadata...")
         
         # Insert zip file record with enhanced data
         cursor.execute('''
@@ -542,6 +629,9 @@ class VideoArchiveScanner:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (drive_letter, zip_file_name, zip_path, zip_uuid, 
               zip_file_size, zip_hash, zip_last_modified, datetime.now()))
+        
+        if heartbeat_callback:
+            heartbeat_callback(f"Inserting {len(video_files)} file records...")
         
         # Batch insert video files
         video_data = []
@@ -552,6 +642,9 @@ class VideoArchiveScanner:
             INSERT INTO file_contents (zip_uuid, file_name, file_size, file_path_in_zip, file_hash, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
         ''', video_data)
+        
+        if heartbeat_callback:
+            heartbeat_callback("Committing transaction...")
         
         self.connection.commit()
         
@@ -631,6 +724,25 @@ class VideoArchiveScanner:
         # Clear the line and print progress bar
         print(f"\r{color}[{drive_name:<8}] |{bar}| {percentage:6.1f}% {status_text}", end="", flush=True)
     
+    def print_progress_bar_enhanced(self, progress: float, width: int = 35, drive_name: str = "", 
+                                  current: int = 0, total: int = 0, color: str = Fore.GREEN,
+                                  current_file: str = "", eta: str = ""):
+        """Print an enhanced progress bar with current file and ETA"""
+        filled_length = int(width * progress)
+        bar = '█' * filled_length + '░' * (width - filled_length)
+        
+        percentage = progress * 100
+        status_text = f"{current}/{total}"
+        
+        # Truncate current file if too long
+        if len(current_file) > 25:
+            current_file = current_file[:22] + "..."
+        
+        # Print progress bar with newline for thread safety
+        if progress >= 1.0 or current_file == "COMPLETE":
+            print(f"{color}[{drive_name:<8}] |{bar}| {percentage:5.1f}% {status_text} | {current_file:<25} | {eta}{Style.RESET_ALL}", 
+                  flush=True)
+    
     def spinner_animation(self, message: str, color: str = Fore.CYAN, stop_event=None):
         """Display spinning animation with message"""
         spinner_chars = "|/-\\|/-\\"
@@ -660,7 +772,8 @@ class VideoArchiveScanner:
         folders_scanned = 0
         takeout_folders_found = 0
         
-        print(f"\n{drive_color}Scanning drive (GoogleTakeout mode): {drive}{Style.RESET_ALL}")
+        label, size_gb = self.get_drive_info(drive)
+        print(f"\n{drive_color}Scanning drive (GoogleTakeout mode): {drive} [{label}, {size_gb:.1f} GB]{Style.RESET_ALL}")
         
         # Start spinner for folder scanning
         stop_event, spinner_thread = self.start_spinner(f"Scanning for GoogleTakeout folders on {drive}...", drive_color)
@@ -711,7 +824,8 @@ class VideoArchiveScanner:
         total_videos = 0
         zip_count = 0
         
-        print(f"\n{drive_color}Scanning drive (all zip files): {drive}{Style.RESET_ALL}")
+        label, size_gb = self.get_drive_info(drive)
+        print(f"\n{drive_color}Scanning drive (all zip files): {drive} [{label}, {size_gb:.1f} GB]{Style.RESET_ALL}")
         
         # Start spinner for zip file discovery
         stop_event, spinner_thread = self.start_spinner(f"Finding all zip files on {drive}...", drive_color)
@@ -741,26 +855,84 @@ class VideoArchiveScanner:
         total_zips = 0
         total_videos = 0
         zip_count = 0
+        start_time = time.time()
         
-        # Process with progress bar
+        # Process with enhanced progress display
         for zip_path in all_zips:
             zip_count += 1
             progress = zip_count / total_zip_files
             
-            # Show progress bar
-            zip_name = os.path.basename(zip_path)[:30]
-            self.print_progress_bar(progress, 40, drive, zip_count, total_zip_files, drive_color)
+            # Show current zip file being processed
+            zip_name = os.path.basename(zip_path)
+            if len(zip_name) > 35:
+                zip_name = zip_name[:32] + "..."
             
-            # Process the zip file
-            video_files = self.scan_zip_for_videos(zip_path)
+            # Calculate time estimates
+            elapsed_time = time.time() - start_time
+            if zip_count > 1:
+                avg_time_per_zip = elapsed_time / (zip_count - 1)
+                remaining_zips = total_zip_files - zip_count
+                estimated_remaining = avg_time_per_zip * remaining_zips
+                eta_str = f"ETA: {int(estimated_remaining//60):02d}:{int(estimated_remaining%60):02d}"
+            else:
+                eta_str = "ETA: --:--"
+            
+            # Show progress bar with current file and ETA
+            self.print_progress_bar_enhanced(progress, 35, drive, zip_count, total_zip_files, 
+                                           drive_color, zip_name, eta_str)
+            
+            # Get zip file size
+            try:
+                zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+                size_str = f"({zip_size_mb:.1f} MB)"
+            except:
+                size_str = "(size unknown)"
+            
+            # Process the zip file with status update showing size
+            print(f"{drive_color}[{drive:<8}] Processing: {zip_name} {size_str}{Style.RESET_ALL}", flush=True)
+            
+            # Start heartbeat for long operations
+            processing_start = time.time()
+            heartbeat_interval = 3  # seconds
+            last_heartbeat = processing_start
+            
+            # Define progress callback to show what's happening inside the zip
+            def zip_progress_callback(status_msg):
+                nonlocal last_heartbeat
+                current_time = time.time()
+                elapsed = current_time - processing_start
+                
+                # Show heartbeat every few seconds
+                if current_time - last_heartbeat >= heartbeat_interval:
+                    print(f"{drive_color}[{drive:<8}] Processing... {elapsed:.1f}s elapsed{Style.RESET_ALL}", flush=True)
+                    last_heartbeat = current_time
+                
+                print(f"{drive_color}[{drive:<8}] {status_msg}{Style.RESET_ALL}", flush=True)
+            
+            video_files = self.scan_zip_for_videos(zip_path, progress_callback=zip_progress_callback)
             
             if video_files:
-                self.insert_zip_data(zip_path, video_files)
+                # Show database insertion status
+                insert_start = time.time()
+                print(f"{drive_color}[{drive:<8}] Inserting {len(video_files)} files from {zip_name}{Style.RESET_ALL}", flush=True)
+                
+                # Define heartbeat callback for database operations
+                def db_heartbeat_callback(status_msg):
+                    print(f"{drive_color}[{drive:<8}] {status_msg}{Style.RESET_ALL}", flush=True)
+                
+                self.insert_zip_data(zip_path, video_files, heartbeat_callback=db_heartbeat_callback)
+                
+                insert_elapsed = time.time() - insert_start
+                if insert_elapsed > 1.0:  # Only show timing if it took more than 1 second
+                    print(f"{drive_color}[{drive:<8}] Inserted {len(video_files)} files ({insert_elapsed:.1f}s){Style.RESET_ALL}", flush=True)
+                
                 total_zips += 1
                 total_videos += len(video_files)
         
         # Complete the progress bar
-        self.print_progress_bar(1.0, 40, drive, total_zip_files, total_zip_files, drive_color)
+        final_elapsed_time = time.time() - start_time
+        self.print_progress_bar_enhanced(1.0, 35, drive, total_zip_files, total_zip_files, 
+                                       drive_color, "COMPLETE", f"Time: {int(final_elapsed_time//60):02d}:{int(final_elapsed_time%60):02d}")
         
         if total_videos > 0:
             print(f"\n{Fore.GREEN}   Processed {total_zips} zip files, found {total_videos:,} videos")
@@ -770,34 +942,37 @@ class VideoArchiveScanner:
         return total_zips, total_videos, 0
     
     def get_database_summary(self):
-        """Get current database summary"""
-        cursor = self.connection.cursor()
+        """Get current database summary with thread-safe connection"""
+        # Create a new connection for thread safety
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
         
-        cursor.execute("SELECT COUNT(*) FROM zip_files")
-        zip_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM file_contents")
-        video_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT SUM(file_size) FROM file_contents")
-        total_size = cursor.fetchone()[0] or 0
-        
-        cursor.execute("SELECT COUNT(DISTINCT drive_letter) FROM zip_files")
-        drive_count = cursor.fetchone()[0]
-        
-        return {
-            'drives': drive_count,
-            'zip_files': zip_count,
-            'video_files': video_count,
-            'total_size_gb': total_size / (1024**3)
-        }
+        try:
+            cursor.execute("SELECT COUNT(*) FROM zip_files")
+            zip_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM file_contents")
+            video_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT SUM(file_size) FROM file_contents")
+            total_size = cursor.fetchone()[0] or 0
+            
+            cursor.execute("SELECT COUNT(DISTINCT drive_letter) FROM zip_files")
+            drive_count = cursor.fetchone()[0]
+            
+            return {
+                'drives': drive_count,
+                'zip_files': zip_count,
+                'video_files': video_count,
+                'total_size_gb': total_size / (1024**3)
+            }
+        finally:
+            conn.close()
 
     def scan_all_drives(self):
         """Main scanning function with parallel drive processing"""
-        if self.config.get('max_workers', 4) > 1:
-            return self._scan_all_drives_parallel()
-        else:
-            return self._scan_all_drives_sequential()
+        # Temporarily disable parallel processing to fix threading issues
+        return self._scan_all_drives_sequential()
     
     def _scan_all_drives_parallel(self):
         """Parallel drive scanning for better performance"""
@@ -885,9 +1060,13 @@ class VideoArchiveScanner:
         
         try:
             if self.root_folders_only:
-                return self._scan_drive_google_takeout_mode(drive, drive_color)
+                result = self._scan_drive_google_takeout_mode(drive, drive_color)
             else:
-                return self._scan_drive_all_zip_mode(drive, drive_color)
+                result = self._scan_drive_all_zip_mode(drive, drive_color)
+            
+            # Ensure all transactions are committed before closing
+            self.connection.commit()
+            return result
         finally:
             # Restore original connection and close thread connection
             self.connection = original_connection
@@ -1312,9 +1491,13 @@ class VideoArchiveScanner:
         print(f"Exported {len(results)} search results to {filename}")
     
     def close(self):
-        """Close database connection"""
+        """Close database connection with thread safety"""
         if self.connection:
-            self.connection.close()
+            try:
+                self.connection.close()
+            except sqlite3.ProgrammingError:
+                # Connection was created in a different thread, ignore the error
+                pass
 
 
 def main():
