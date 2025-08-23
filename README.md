@@ -2,6 +2,10 @@
 
 A high-performance Python tool for scanning and indexing files within ZIP archives across multiple drives and storage locations. Originally designed for Google Takeout video archives, it now supports scanning ANY file type with advanced filtering, parallel processing, and duplicate detection.
 
+## Demo
+
+![Demo](resources/Demo.jpg)
+
 ## Features
 
 ### Performance & Scanning
