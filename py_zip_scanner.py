@@ -67,34 +67,83 @@ class VideoArchiveScanner:
         self.setup_database()
     
     def load_config(self, config_file: str = None) -> Dict[str, Any]:
-        """Load configuration from JSON file"""
-        default_config = {
-            "video_extensions": [
-                ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v",
-                ".3gp", ".3g2", ".asf", ".divx", ".f4v", ".m2ts", ".mts", ".ogv",
-                ".rm", ".rmvb", ".vob", ".xvid", ".mpg", ".mpeg", ".m1v", ".m2v"
-            ],
-            "excluded_directories": [
-                "System Volume Information", "$RECYCLE.BIN", "Windows", 
-                "node_modules", ".git", "__pycache__"
-            ],
-            "batch_size": 1000,
-            "max_memory_mb": 100,
-            "max_workers": 4,
-            "enable_thumbnails": False,
-            "enable_hashing": True,
-            "quiet_mode": False,
-            "dry_run": False
-        }
+        """Load configuration from JSON file with default fallback"""
+        # Determine config file to use
+        config_files_to_try = []
         
-        if config_file and os.path.exists(config_file):
+        if config_file:
+            config_files_to_try.append(config_file)
+        
+        # Always try local config.json (gitignored)
+        local_config_path = 'config.json'
+        config_files_to_try.append(local_config_path)
+        
+        # Auto-copy default config to local if it doesn't exist
+        if not os.path.exists(local_config_path) and os.path.exists('config_default.json'):
             try:
-                with open(config_file, 'r') as f:
-                    user_config = json.load(f)
-                    default_config.update(user_config)
-                    logger.info(f"Loaded configuration from {config_file}")
+                import shutil
+                shutil.copy2('config_default.json', local_config_path)
+                logger.info(f"Created local config file: {local_config_path}")
+                logger.info(f"You can now edit {local_config_path} to customize settings")
+            except Exception as e:
+                logger.warning(f"Could not auto-create {local_config_path}: {e}")
+        
+        # Fallback to default config
+        config_files_to_try.append('config_default.json')
+        
+        # Load default config first
+        default_config_path = os.path.join(os.path.dirname(__file__), 'config_default.json')
+        default_config = {}
+        
+        if os.path.exists(default_config_path):
+            try:
+                with open(default_config_path, 'r') as f:
+                    default_config = json.load(f)
+                    # Remove comment fields
+                    default_config.pop('_comment', None)
+                    default_config.pop('_instructions', None)
             except (json.JSONDecodeError, IOError) as e:
-                logger.warning(f"Failed to load config file {config_file}: {e}")
+                logger.warning(f"Failed to load default config: {e}")
+        
+        # Hardcoded fallback if default config file missing
+        if not default_config:
+            default_config = {
+                "video_extensions": [
+                    ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v",
+                    ".3gp", ".3g2", ".asf", ".divx", ".f4v", ".m2ts", ".mts", ".ogv",
+                    ".rm", ".rmvb", ".vob", ".xvid", ".mpg", ".mpeg", ".m1v", ".m2v"
+                ],
+                "excluded_directories": [
+                    "System Volume Information", "$RECYCLE.BIN", "Windows", 
+                    "node_modules", ".git", "__pycache__"
+                ],
+                "excluded_drives": [],
+                "batch_size": 1000,
+                "max_memory_mb": 100,
+                "max_workers": 4,
+                "enable_thumbnails": False,
+                "enable_hashing": True,
+                "scan_all_files": False,
+                "quiet_mode": False,
+                "dry_run": False
+            }
+        
+        # Try to load user config
+        for config_path in config_files_to_try:
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r') as f:
+                        user_config = json.load(f)
+                        # Remove comment fields
+                        user_config.pop('_comment', None)
+                        user_config.pop('_instructions', None)
+                        
+                        default_config.update(user_config)
+                        logger.info(f"Loaded configuration from {config_path}")
+                        break
+                except (json.JSONDecodeError, IOError) as e:
+                    logger.warning(f"Failed to load config file {config_path}: {e}")
+                    continue
         
         return default_config
     
@@ -243,9 +292,10 @@ class VideoArchiveScanner:
             logger.error(f"Error during schema migration: {e}")
             # Continue anyway - the database might still be usable
     
-    def get_available_drives(self) -> List[str]:
+    def get_available_drives(self, exclude_drives: List[str] = None) -> List[str]:
         """Get list of available drives based on the operating system"""
         drives = []
+        exclude_drives = exclude_drives or []
         
         # Check if running in WSL
         is_wsl = self.is_wsl()
@@ -283,6 +333,14 @@ class VideoArchiveScanner:
                         logger.warning(f"Permission denied accessing {mount_dir}")
             
             drives = mount_points
+        
+        # Filter out excluded drives
+        if exclude_drives:
+            original_count = len(drives)
+            drives = [d for d in drives if d not in exclude_drives]
+            excluded_count = original_count - len(drives)
+            if excluded_count > 0:
+                logger.info(f"Excluded {excluded_count} drives: {[d for d in exclude_drives if d in drives]}")
         
         logger.info(f"Found {len(drives)} available drives: {drives}")
         return drives
@@ -366,6 +424,12 @@ class VideoArchiveScanner:
         video_extensions = set(self.config.get('video_extensions', VIDEO_EXTENSIONS))
         return Path(filename).suffix.lower() in video_extensions
     
+    def is_target_file(self, filename: str, all_files: bool = False) -> bool:
+        """Check if file should be indexed (videos by default, all files if specified)"""
+        if all_files:
+            return True  # Index all file types
+        return self.is_video_file(filename)
+    
     def calculate_file_hash(self, zip_path: str, file_path_in_zip: str) -> Optional[str]:
         """Calculate MD5 hash of a file within a ZIP archive"""
         if not self.config.get('enable_hashing', True):
@@ -406,16 +470,16 @@ class VideoArchiveScanner:
             logger.warning(f"Failed to hash ZIP file {zip_path}: {e}")
             return None
     
-    def scan_zip_for_videos(self, zip_path: str) -> List[Tuple[str, int, str, Optional[str]]]:
-        """Scan a zip file for video files and return (name, size, path_in_zip, hash) tuples"""
-        video_files = []
+    def scan_zip_for_videos(self, zip_path: str, all_files: bool = False) -> List[Tuple[str, int, str, Optional[str]]]:
+        """Scan a zip file for target files and return (name, size, path_in_zip, hash) tuples"""
+        target_files = []
         
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_file:
                 for file_info in zip_file.infolist():
-                    if not file_info.is_dir() and self.is_video_file(file_info.filename):
+                    if not file_info.is_dir() and self.is_target_file(file_info.filename, all_files):
                         file_hash = self.calculate_file_hash(zip_path, file_info.filename)
-                        video_files.append((
+                        target_files.append((
                             os.path.basename(file_info.filename),
                             file_info.file_size,
                             file_info.filename,
@@ -425,7 +489,7 @@ class VideoArchiveScanner:
             logger.warning(f"Cannot read zip file {zip_path}: {e}")
             return []
         
-        return video_files
+        return target_files
     
     def get_drive_letter(self, path: str) -> str:
         """Extract drive letter or mount point from a path"""
@@ -729,7 +793,108 @@ class VideoArchiveScanner:
         }
 
     def scan_all_drives(self):
-        """Main scanning function to process all drives with colored progress bars"""
+        """Main scanning function with parallel drive processing"""
+        if self.config.get('max_workers', 4) > 1:
+            return self._scan_all_drives_parallel()
+        else:
+            return self._scan_all_drives_sequential()
+    
+    def _scan_all_drives_parallel(self):
+        """Parallel drive scanning for better performance"""
+        drives = self.get_available_drives()
+        total_zips = 0
+        total_videos = 0
+        total_folders_scanned = 0
+        
+        # Get initial database state
+        initial_stats = self.get_database_summary()
+        
+        print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.CYAN}DATABASE STATUS (BEFORE SCAN){Style.RESET_ALL}")
+        print(f"   Drives indexed: {Fore.YELLOW}{initial_stats['drives']}{Style.RESET_ALL}")
+        print(f"   Zip files: {Fore.YELLOW}{initial_stats['zip_files']}{Style.RESET_ALL}")
+        print(f"   Video files: {Fore.YELLOW}{initial_stats['video_files']:,}{Style.RESET_ALL}")
+        print(f"   Total size: {Fore.YELLOW}{initial_stats['total_size_gb']:.2f} GB{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        
+        scan_mode_desc = "GoogleTakeout folders only" if self.root_folders_only else "all zip files on drives"
+        print(f"\n{Style.BRIGHT}{Fore.WHITE}Starting PARALLEL scan of {len(drives)} drives ({scan_mode_desc})...{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Drive scan order: {', '.join(drives)}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Using {self.config.get('max_workers', 4)} parallel workers{Style.RESET_ALL}")
+        
+        start_time = time.time()
+        
+        # Parallel processing with ThreadPoolExecutor
+        drive_colors = [Fore.GREEN, Fore.BLUE, Fore.MAGENTA, Fore.CYAN, Fore.RED, Fore.YELLOW]
+        
+        with ThreadPoolExecutor(max_workers=self.config.get('max_workers', 4)) as executor:
+            # Submit all drive scanning tasks
+            future_to_drive = {}
+            for i, drive in enumerate(drives):
+                drive_color = drive_colors[i % len(drive_colors)]
+                future = executor.submit(self._scan_single_drive_for_parallel, drive, drive_color)
+                future_to_drive[future] = drive
+            
+            # Process completed tasks
+            for future in future_to_drive:
+                drive = future_to_drive[future]
+                try:
+                    drive_zips, drive_videos, folders_scanned = future.result()
+                    total_zips += drive_zips
+                    total_videos += drive_videos
+                    total_folders_scanned += folders_scanned
+                except Exception as e:
+                    logger.error(f"Drive {drive} scanning failed: {e}")
+        
+        elapsed_time = time.time() - start_time
+        minutes, seconds = divmod(elapsed_time, 60)
+        
+        # Get final database state
+        final_stats = self.get_database_summary()
+        
+        # Calculate differences
+        new_zip_files = final_stats['zip_files'] - initial_stats['zip_files']
+        new_video_files = final_stats['video_files'] - initial_stats['video_files']
+        new_size_gb = final_stats['total_size_gb'] - initial_stats['total_size_gb']
+        
+        # Final summary
+        print(f"\n{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.GREEN}PARALLEL SCAN COMPLETE!{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.CYAN}SCAN RESULTS:{Style.RESET_ALL}")
+        print(f"   Drives scanned: {Fore.YELLOW}{len(drives)}{Style.RESET_ALL}")
+        print(f"   Folders examined: {Fore.YELLOW}{total_folders_scanned:,}{Style.RESET_ALL}")
+        print(f"   Zip files processed: {Fore.YELLOW}{total_zips}{Style.RESET_ALL}")
+        print(f"   Video files found: {Fore.YELLOW}{total_videos:,}{Style.RESET_ALL}")
+        print(f"   Time elapsed: {Fore.YELLOW}{int(minutes):02d}:{int(seconds):02d}{Style.RESET_ALL}")
+        
+        print(f"\n{Style.BRIGHT}{Fore.CYAN}DATABASE STATUS (AFTER SCAN){Style.RESET_ALL}")
+        print(f"   Total drives indexed: {Fore.YELLOW}{final_stats['drives']}{Style.RESET_ALL}")
+        print(f"   Total zip files: {Fore.YELLOW}{final_stats['zip_files']}{Style.RESET_ALL} {Fore.GREEN}(+{new_zip_files}){Style.RESET_ALL}")
+        print(f"   Total video files: {Fore.YELLOW}{final_stats['video_files']:,}{Style.RESET_ALL} {Fore.GREEN}(+{new_video_files:,}){Style.RESET_ALL}")
+        print(f"   Total size: {Fore.YELLOW}{final_stats['total_size_gb']:.2f} GB{Style.RESET_ALL} {Fore.GREEN}(+{new_size_gb:.2f} GB){Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        
+        logger.info(f"Parallel scan complete. Processed {total_zips} zip files containing {total_videos} video files")
+    
+    def _scan_single_drive_for_parallel(self, drive: str, drive_color: str) -> Tuple[int, int, int]:
+        """Scan a single drive - optimized for parallel execution"""
+        # Each thread needs its own database connection for thread safety
+        thread_connection = sqlite3.connect(self.database_path)
+        original_connection = self.connection
+        self.connection = thread_connection
+        
+        try:
+            if self.root_folders_only:
+                return self._scan_drive_google_takeout_mode(drive, drive_color)
+            else:
+                return self._scan_drive_all_zip_mode(drive, drive_color)
+        finally:
+            # Restore original connection and close thread connection
+            self.connection = original_connection
+            thread_connection.close()
+
+    def _scan_all_drives_sequential(self):
+        """Sequential drive scanning (original implementation)"""
         drives = self.get_available_drives()
         total_zips = 0
         total_videos = 0
@@ -797,38 +962,194 @@ class VideoArchiveScanner:
         
         logger.info(f"Scan complete. Processed {total_zips} zip files containing {total_videos} video files")
     
-    def search_videos(self, pattern: str, regex: bool = False) -> List[Tuple]:
-        """Search for video files using case-insensitive matching"""
+    def is_zip_modified(self, zip_path: str) -> bool:
+        """Check if ZIP file has been modified since last scan"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute('''
+                SELECT last_modified FROM zip_files 
+                WHERE zip_file_path = ? 
+                ORDER BY scan_date DESC LIMIT 1
+            ''')
+            result = cursor.fetchone()
+            
+            if not result:
+                return True  # New file
+            
+            stored_mtime = result[0]
+            if not stored_mtime:
+                return True  # No stored modification time
+            
+            # Get current file modification time
+            current_mtime = datetime.fromtimestamp(os.path.getmtime(zip_path))
+            stored_mtime_dt = datetime.fromisoformat(stored_mtime) if isinstance(stored_mtime, str) else stored_mtime
+            
+            # Compare with small tolerance for file system precision
+            return abs((current_mtime - stored_mtime_dt).total_seconds()) > 1
+            
+        except (OSError, sqlite3.Error):
+            return True  # When in doubt, scan it
+    
+    def incremental_scan(self):
+        """Perform incremental scan - only process modified ZIP files"""
+        print(f"{Style.BRIGHT}{Fore.CYAN}Starting INCREMENTAL scan...{Style.RESET_ALL}")
+        
+        drives = self.get_available_drives()
+        total_new_zips = 0
+        total_updated_zips = 0
+        total_skipped_zips = 0
+        
+        for drive in drives:
+            print(f"\n{Fore.YELLOW}Checking {drive} for changes...{Style.RESET_ALL}")
+            
+            if self.root_folders_only:
+                zip_paths = []
+                for takeout_folder, _ in self.find_google_takeout_folders([drive]):
+                    for zip_path in self.find_zip_files_in_folder(takeout_folder):
+                        zip_paths.append(zip_path)
+            else:
+                zip_paths = list(self.find_all_zip_files_on_drive(drive))
+            
+            for zip_path in zip_paths:
+                if self.is_zip_modified(zip_path):
+                    print(f"  {Fore.GREEN}Processing: {os.path.basename(zip_path)}{Style.RESET_ALL}")
+                    video_files = self.scan_zip_for_videos(zip_path)
+                    if video_files:
+                        # Remove old entry first
+                        cursor = self.connection.cursor()
+                        cursor.execute('DELETE FROM zip_files WHERE zip_file_path = ?', (zip_path,))
+                        
+                        self.insert_zip_data(zip_path, video_files)
+                        total_updated_zips += 1
+                    else:
+                        total_new_zips += 1
+                else:
+                    total_skipped_zips += 1
+        
+        print(f"\n{Style.BRIGHT}{Fore.GREEN}INCREMENTAL SCAN COMPLETE!{Style.RESET_ALL}")
+        print(f"   New ZIP files: {Fore.YELLOW}{total_new_zips}{Style.RESET_ALL}")
+        print(f"   Updated ZIP files: {Fore.YELLOW}{total_updated_zips}{Style.RESET_ALL}")
+        print(f"   Skipped (unchanged): {Fore.YELLOW}{total_skipped_zips}{Style.RESET_ALL}")
+        
+        # Get initial database state
+        initial_stats = self.get_database_summary()
+        
+        # Define colors for different drives
+        drive_colors = [
+            Fore.GREEN, Fore.BLUE, Fore.MAGENTA, Fore.CYAN, 
+            Fore.RED, Fore.YELLOW, Fore.WHITE, Fore.LIGHTGREEN_EX,
+            Fore.LIGHTBLUE_EX, Fore.LIGHTMAGENTA_EX, Fore.LIGHTCYAN_EX,
+            Fore.LIGHTRED_EX, Fore.LIGHTYELLOW_EX, Fore.LIGHTWHITE_EX
+        ]
+        
+        print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.CYAN}DATABASE STATUS (BEFORE SCAN){Style.RESET_ALL}")
+        print(f"   Drives indexed: {Fore.YELLOW}{initial_stats['drives']}{Style.RESET_ALL}")
+        print(f"   Zip files: {Fore.YELLOW}{initial_stats['zip_files']}{Style.RESET_ALL}")
+        print(f"   Video files: {Fore.YELLOW}{initial_stats['video_files']:,}{Style.RESET_ALL}")
+        print(f"   Total size: {Fore.YELLOW}{initial_stats['total_size_gb']:.2f} GB{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        
+        scan_mode_desc = "GoogleTakeout folders only" if self.root_folders_only else "all zip files on drives"
+        print(f"\n{Style.BRIGHT}{Fore.WHITE}Starting scan of {len(drives)} drives ({scan_mode_desc})...{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Drive scan order: {', '.join(drives)}{Style.RESET_ALL}")
+        
+        start_time = time.time()
+        
+        for i, drive in enumerate(drives):
+            drive_color = drive_colors[i % len(drive_colors)]
+            drive_zips, drive_videos, folders_scanned = self.scan_drive_with_progress(drive, drive_color)
+            total_zips += drive_zips
+            total_videos += drive_videos
+            total_folders_scanned += folders_scanned
+        
+        elapsed_time = time.time() - start_time
+        minutes, seconds = divmod(elapsed_time, 60)
+        
+        # Get final database state
+        final_stats = self.get_database_summary()
+        
+        # Calculate differences
+        new_zip_files = final_stats['zip_files'] - initial_stats['zip_files']
+        new_video_files = final_stats['video_files'] - initial_stats['video_files']
+        new_size_gb = final_stats['total_size_gb'] - initial_stats['total_size_gb']
+        
+        # Final summary
+        print(f"\n{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.GREEN}SCAN COMPLETE!{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.CYAN}SCAN RESULTS:{Style.RESET_ALL}")
+        print(f"   Drives scanned: {Fore.YELLOW}{len(drives)}{Style.RESET_ALL}")
+        print(f"   Folders examined: {Fore.YELLOW}{total_folders_scanned:,}{Style.RESET_ALL}")
+        print(f"   Zip files processed: {Fore.YELLOW}{total_zips}{Style.RESET_ALL}")
+        print(f"   Video files found: {Fore.YELLOW}{total_videos:,}{Style.RESET_ALL}")
+        print(f"   Time elapsed: {Fore.YELLOW}{int(minutes):02d}:{int(seconds):02d}{Style.RESET_ALL}")
+        
+        print(f"\n{Style.BRIGHT}{Fore.CYAN}DATABASE STATUS (AFTER SCAN){Style.RESET_ALL}")
+        print(f"   Total drives indexed: {Fore.YELLOW}{final_stats['drives']}{Style.RESET_ALL}")
+        print(f"   Total zip files: {Fore.YELLOW}{final_stats['zip_files']}{Style.RESET_ALL} {Fore.GREEN}(+{new_zip_files}){Style.RESET_ALL}")
+        print(f"   Total video files: {Fore.YELLOW}{final_stats['video_files']:,}{Style.RESET_ALL} {Fore.GREEN}(+{new_video_files:,}){Style.RESET_ALL}")
+        print(f"   Total size: {Fore.YELLOW}{final_stats['total_size_gb']:.2f} GB{Style.RESET_ALL} {Fore.GREEN}(+{new_size_gb:.2f} GB){Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        
+        logger.info(f"Scan complete. Processed {total_zips} zip files containing {total_videos} video files")
+    
+    def search_videos(self, pattern: str, regex: bool = False, min_size: int = 0, 
+                     max_size: int = None, file_types: List[str] = None) -> List[Tuple]:
+        """Search for video files with advanced filtering options"""
         cursor = self.connection.cursor()
         
-        if regex:
-            # Use SQLite's regexp function (requires regex support)
-            query = '''
-                SELECT z.drive_letter, z.zip_file_name, z.zip_file_path, 
-                       f.file_name, f.file_size, f.file_path_in_zip
-                FROM zip_files z
-                JOIN file_contents f ON z.uuid = f.zip_uuid
-                WHERE f.file_name REGEXP ?
-                ORDER BY z.drive_letter, z.zip_file_name, f.file_name
-            '''
-            try:
-                cursor.execute(query, (f"(?i){pattern}",))
-            except sqlite3.OperationalError:
-                logger.error("Regex search requires SQLite with regex support. Using LIKE instead.")
-                return self.search_videos(pattern, regex=False)
-        else:
-            # Use LIKE for simple pattern matching
-            query = '''
-                SELECT z.drive_letter, z.zip_file_name, z.zip_file_path,
-                       f.file_name, f.file_size, f.file_path_in_zip
-                FROM zip_files z
-                JOIN file_contents f ON z.uuid = f.zip_uuid
-                WHERE f.file_name LIKE ? COLLATE NOCASE
-                ORDER BY z.drive_letter, z.zip_file_name, f.file_name
-            '''
-            cursor.execute(query, (f"%{pattern}%",))
+        # Base query with joins
+        base_query = '''
+            SELECT z.drive_letter, z.zip_file_name, z.zip_file_path, 
+                   f.file_name, f.file_size, f.file_path_in_zip
+            FROM zip_files z
+            JOIN file_contents f ON z.uuid = f.zip_uuid
+            WHERE 1=1
+        '''
         
-        return cursor.fetchall()
+        params = []
+        
+        # Add pattern matching
+        if pattern:
+            if regex:
+                base_query += " AND f.file_name REGEXP ?"
+                params.append(f"(?i){pattern}")
+            else:
+                base_query += " AND f.file_name LIKE ? COLLATE NOCASE"
+                params.append(f"%{pattern}%")
+        
+        # Add size filtering
+        if min_size > 0:
+            base_query += " AND f.file_size >= ?"
+            params.append(min_size)
+        
+        if max_size is not None:
+            base_query += " AND f.file_size <= ?"
+            params.append(max_size)
+        
+        # Add file type filtering
+        if file_types:
+            type_conditions = []
+            for file_type in file_types:
+                if not file_type.startswith('.'):
+                    file_type = '.' + file_type
+                type_conditions.append("f.file_name LIKE ? COLLATE NOCASE")
+                params.append(f"%{file_type}")
+            
+            if type_conditions:
+                base_query += " AND (" + " OR ".join(type_conditions) + ")"
+        
+        base_query += " ORDER BY z.drive_letter, z.zip_file_name, f.file_name"
+        
+        try:
+            cursor.execute(base_query, params)
+            return cursor.fetchall()
+        except sqlite3.OperationalError as e:
+            if "REGEXP" in str(e):
+                logger.error("Regex search requires SQLite with regex support. Using LIKE instead.")
+                return self.search_videos(pattern, regex=False, min_size=min_size, max_size=max_size, file_types=file_types)
+            else:
+                raise
     
     def print_search_results(self, results: List[Tuple]):
         """Pretty print search results with full paths"""
@@ -1028,6 +1349,20 @@ def main():
                        help='Find and display duplicate video files')
     parser.add_argument('--validate-db', action='store_true',
                        help='Validate database integrity')
+    parser.add_argument('--incremental', action='store_true',
+                       help='Perform incremental scan (only scan modified files)')
+    parser.add_argument('--min-size', type=int, default=0,
+                       help='Minimum file size in bytes for search results')
+    parser.add_argument('--max-size', type=int,
+                       help='Maximum file size in bytes for search results')
+    parser.add_argument('--file-types', nargs='*',
+                       help='Filter by file extensions (e.g., mp4 avi mov)')
+    parser.add_argument('--workers', type=int, default=4,
+                       help='Number of parallel workers for scanning (default: 4)')
+    parser.add_argument('--exclude-drives', nargs='*',
+                       help='Drives to exclude from scanning (e.g., C: D: /mnt/backup)')
+    parser.add_argument('--all-files', action='store_true',
+                       help='Scan ALL file types in ZIP archives, not just videos')
     
     args = parser.parse_args()
     
@@ -1040,12 +1375,20 @@ def main():
         scanner.config['dry_run'] = True
     if args.exclude_paths:
         scanner.config['excluded_directories'].extend(args.exclude_paths)
+    if args.workers:
+        scanner.config['max_workers'] = args.workers
+    if args.all_files:
+        scanner.config['scan_all_files'] = True
+    if args.exclude_drives:
+        scanner.config['exclude_drives'] = args.exclude_drives
     
     try:
         if args.scan:
             scan_mode = "GoogleTakeout folders" if args.google_takeout else "all zip files on all drives"
             logger.info(f"Starting drive scan in {scan_mode} mode...")
             scanner.scan_all_drives()
+        elif args.incremental:
+            scanner.incremental_scan()
         elif args.validate_db:
             issues = scanner.validate_database()
             if issues:
@@ -1065,7 +1408,13 @@ def main():
             else:
                 print("No duplicate videos found.")
         elif args.search:
-            results = scanner.search_videos(args.search, args.regex)
+            results = scanner.search_videos(
+                args.search, 
+                args.regex,
+                min_size=args.min_size,
+                max_size=args.max_size,
+                file_types=args.file_types
+            )
             scanner.print_search_results(results)
             
             # Export to CSV if requested

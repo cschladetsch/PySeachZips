@@ -1,4 +1,7 @@
 {
+    "_comment": "Default configuration for PySearchVideos - DO NOT EDIT",
+    "_instructions": "Copy this file to 'config.json' (gitignored) and modify as needed",
+    
     "video_extensions": [
         ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v",
         ".3gp", ".3g2", ".asf", ".divx", ".f4v", ".m2ts", ".mts", ".ogv",
@@ -12,14 +15,18 @@
         ".git", 
         "__pycache__",
         ".svn",
-        "Thumbs.db"
+        "Thumbs.db",
+        "temp",
+        "cache"
     ],
+    "excluded_drives": [],
     "database_path": "./zip_files.db",
     "batch_size": 1000,
     "max_memory_mb": 100,
     "max_workers": 4,
     "enable_thumbnails": false,
     "enable_hashing": true,
+    "scan_all_files": false,
     "quiet_mode": false,
     "dry_run": false
 }

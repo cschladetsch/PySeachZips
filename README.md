@@ -1,18 +1,39 @@
-# PySearchVideos
+# PySearchZips
 
-A Python tool for scanning and indexing video files within zip archives across multiple drives and storage locations. Supports two scanning modes: GoogleTakeout folders only (default) or comprehensive scanning of all zip files.
+A high-performance Python tool for scanning and indexing files within ZIP archives across multiple drives and storage locations. Originally designed for Google Takeout video archives, it now supports scanning ANY file type with advanced filtering, parallel processing, and duplicate detection.
 
 ## Features
 
-- **Multi-drive scanning**: Automatically detects available drives on Windows, Linux, macOS, and WSL environments
-- **Flexible scanning modes**: 
-  - **GoogleTakeout mode** (default): Scans zip files only in GoogleTakeout folders found in root directories of drives
-  - **All-zip mode**: Scans all zip files across entire drives when using `--no-google-takeout`
-- **Video file indexing**: Scans zip archives for video files with support for 20+ video formats
-- **SQLite database**: Stores file metadata in a searchable database
-- **Search functionality**: Find videos by filename with optional regex support
-- **Progress tracking**: Real-time progress bars and colored output for better user experience
-- **Cross-platform**: Works on Windows, Linux, macOS, and Windows Subsystem for Linux (WSL)
+### Performance & Scanning
+- **Parallel processing**: Multi-threaded scanning with configurable worker count
+- **Incremental updates**: Only scan modified ZIP files for fast re-indexing  
+- **Memory-efficient**: Configurable memory limits for large archive processing
+- **Batch operations**: Optimized database insertions for maximum speed
+
+### Flexible File Support
+- **Any file type**: Videos (default) or ALL files in ZIP archives (`--all-files`)
+- **Multiple scanning modes**:
+  - **GoogleTakeout mode** (default): Scans GoogleTakeout folders in root directories
+  - **All-zip mode**: Comprehensive scanning of all ZIP files across drives
+- **Smart filtering**: Filter by file extensions, size ranges, and modification dates
+
+### Advanced Search & Analysis
+- **Powerful search**: Text patterns, regex support, and multi-criteria filtering
+- **Duplicate detection**: Find identical files using content hashing (MD5)
+- **Size-based filtering**: Min/max file size constraints for search results
+- **CSV export**: Export search results for analysis in spreadsheets
+
+### Configuration & Customization
+- **Auto-configuration**: Copies default settings to local `config.json` on first run
+- **Drive/folder exclusion**: Skip specific drives or directory patterns
+- **Extensible**: Custom video extensions and excluded directory patterns
+- **Multiple databases**: Support for multiple database files
+
+### User Experience
+- **Real-time progress**: Colored progress bars and live status updates
+- **Cross-platform**: Windows, Linux, macOS, and Windows Subsystem for Linux (WSL)
+- **Database validation**: Integrity checking and repair capabilities
+- **Quiet/dry-run modes**: Silent operation and preview modes
 
 ## Workflow
 
@@ -80,37 +101,61 @@ pip install colorama  # Optional, for colored output
 
 ## Usage
 
-### Scan drives for Google Takeout archives (default mode)
+### Quick Start
 
+```bash
+# First run: Auto-creates config.json from defaults
+./py_zip_scanner.py --scan
+
+# Search for videos with "vacation" in the name
+./py_zip_scanner.py --search "vacation"
+
+# Find all .txt files in ZIP archives
+./py_zip_scanner.py --search ".txt" --file-types txt --all-files
+```
+
+### Scanning Modes
+
+#### GoogleTakeout Mode (Default)
 ```bash
 ./py_zip_scanner.py --scan
 ```
+- Scans GoogleTakeout folders in root directories of all drives
+- Fast, focused scanning for Google Takeout archives
+- Stores results in `zip_files.db`
 
-This will:
-- Scan all available drives for GoogleTakeout folders in root directories
-- Index all video files found in zip archives within GoogleTakeout folders (recursively)
-- Store results in `google_takeout_videos.db`
-
-### Scan all zip files on all drives
-
-```bash
+#### All-ZIP Mode  
+```bash  
 ./py_zip_scanner.py --scan --no-google-takeout
 ```
+- Comprehensive scan of ALL ZIP files across ALL drives
+- **Warning**: Significantly longer scan time
+- Useful for complete archive inventories
 
-This will:
-- Scan ALL zip files on ALL available drives and all folders (comprehensive scan)
-- Index all video files found in any zip archive anywhere on the drives
-- Store results in `google_takeout_videos.db`
-- **Warning**: This mode may take significantly longer and process many more files
+#### All File Types
+```bash
+./py_zip_scanner.py --scan --all-files --no-google-takeout
+```
+- Scans ALL file types in ZIP archives (not just videos)
+- Perfect for document archives, code repositories, etc.
 
-### Search for video files
+### Advanced Searching
 
 ```bash
 # Simple text search
 ./py_zip_scanner.py --search "vacation"
 
-# Regex search
+# Regex search  
 ./py_zip_scanner.py --search "IMG_\d{4}\.mp4" --regex
+
+# Size-based filtering (files > 100MB)
+./py_zip_scanner.py --search ".*" --regex --min-size 104857600
+
+# Search specific file types
+./py_zip_scanner.py --search "document" --file-types pdf docx txt --all-files
+
+# Export results to CSV
+./py_zip_scanner.py --search "vacation" --export-csv results.csv
 ```
 
 ### View database statistics
@@ -133,10 +178,19 @@ This will:
 
 ### Advanced features
 
-#### Configuration file support
+#### Configuration Management
 ```bash
-# Create a config.json file based on config_example.json
-./py_zip_scanner.py --config config.json --scan
+# First run automatically creates config.json from defaults
+./py_zip_scanner.py --scan
+
+# Edit your local configuration (gitignored)
+nano config.json
+
+# Use automatically (no --config flag needed)
+./py_zip_scanner.py --scan
+
+# Use specific config file
+./py_zip_scanner.py --config high_performance.json --scan
 ```
 
 #### Find duplicate videos
@@ -216,6 +270,8 @@ The tool provides colored terminal output with:
 
 - `py_zip_scanner.py`: Main scanner application
 - `test_drives.py`: Test script for drive detection functionality
-- `config_example.json`: Example configuration file
+- `config_default.json`: Default configuration (DO NOT EDIT)
+- `config.json`: Local configuration (gitignored, copy from default)
 - `zip_files.db`: SQLite database (created automatically)
 - `REVIEW.md`: Code review and usage summary
+- `EXAMPLES.md`: Comprehensive usage examples
