@@ -73,8 +73,8 @@ The tool creates an SQLite database storing metadata about ZIP files and their c
 
 ## GitHub Description
 
-**PySearchZips** is a high-performance Python tool for scanning, indexing, and extracting files from ZIP archives across multiple drives. Featuring a clean modular architecture with comprehensive extraction capabilities, it's perfect for managing large collections of archived content.
+**PySearchZips is a high-performance Python tool that transforms ZIP archive management from tedious manual searching to powerful automated discovery and extraction.** Build a fast, searchable SQLite database of all your archived content, then extract files by name patterns, specific ZIP UUIDs, or perform bulk operations with real-time progress tracking. Perfect for Google Takeout archives, document collections, media libraries, and backup analysis.
 
-**Key features:** Dual scanning modes (GoogleTakeout focus vs comprehensive), powerful search with regex support, multiple extraction methods (by name, UUID, or bulk), interactive selection menus, real-time progress tracking, and cross-platform compatibility (Windows, Linux, macOS, WSL).
+**Features clean modular architecture (890 lines across 4 focused modules), cross-platform compatibility (Windows/Linux/macOS/WSL), and interactive workflows with smart selection menus and comprehensive error handling.** Proven performance handling 485GB+ databases with 1,500+ files efficiently. From scanning drives to precise file extraction, PySearchZips makes large archive collections manageable and accessible.
 
-**Use cases:** Google Takeout archive management, document collection organization, media library extraction, backup archive analysis, and large-scale file recovery operations. Handles any file type with optional filtering and provides precise extraction capabilities with user-friendly progress feedback.
+**Topics:** `zip-archives` `file-extraction` `python-cli` `cross-platform` `google-takeout` `archive-management` `sqlite-database` `backup-recovery`
