@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Google Takeout Video Scanner
+Video Archive Scanner
 
-Scans all available drives for GoogleTakeout folders, indexes video files from zip archives,
-and provides a searchable SQLite database with case-insensitive regex support.
+Scans all available drives for zip files containing videos. Two modes available:
+- Root folder mode (default): Scans zip files in root folders of drives
+- All-zip mode: Scans all zip files across entire drives
+Provides a searchable SQLite database with case-insensitive regex support.
 """
 
 import os
@@ -44,9 +46,10 @@ VIDEO_EXTENSIONS = {
     '.rm', '.rmvb', '.vob', '.xvid', '.mpg', '.mpeg', '.m1v', '.m2v'
 }
 
-class GoogleTakeoutScanner:
-    def __init__(self, database_path: str = 'google_takeout_videos.db'):
+class VideoArchiveScanner:
+    def __init__(self, database_path: str = 'google_takeout_videos.db', root_folders_only: bool = True):
         self.database_path = database_path
+        self.root_folders_only = root_folders_only
         self.connection = None
         self.setup_database()
     
@@ -150,19 +153,20 @@ class GoogleTakeoutScanner:
             return False
     
     def find_google_takeout_folders(self, drives: List[str]) -> Generator[Tuple[str, int], None, None]:
-        """Find all GoogleTakeout folders in root of drives only"""
+        """Find GoogleTakeout folders in root directories of drives"""
         for drive in drives:
             logger.info(f"Scanning drive: {drive}")
             folders_scanned = 0
             takeout_folders = []
             
             try:
-                # Only scan root folder of the drive
+                # Only scan root folder of the drive for GoogleTakeout folders
                 if os.path.exists(drive):
                     try:
                         items = os.listdir(drive)
                         folders_scanned = len([item for item in items if os.path.isdir(os.path.join(drive, item))])
                         
+                        # Look specifically for GoogleTakeout folders
                         if 'GoogleTakeout' in items:
                             takeout_path = os.path.join(drive, 'GoogleTakeout')
                             if os.path.isdir(takeout_path):
@@ -172,7 +176,7 @@ class GoogleTakeoutScanner:
                         logger.warning(f"Permission denied accessing {drive}")
                         continue
                 
-                # Yield each found takeout folder with total folders scanned for this drive
+                # Yield each found GoogleTakeout folder with total folders scanned for this drive
                 for takeout_path in takeout_folders:
                     yield takeout_path, folders_scanned
                     
@@ -180,16 +184,30 @@ class GoogleTakeoutScanner:
                 logger.warning(f"Cannot access {drive}: {e}")
                 continue
     
-    def find_zip_files(self, takeout_folder: str) -> Generator[str, None, None]:
-        """Find all zip files in a GoogleTakeout folder"""
+    def find_zip_files_in_folder(self, folder_path: str) -> Generator[str, None, None]:
+        """Find all zip files in a given folder"""
         try:
-            for root, dirs, files in os.walk(takeout_folder):
+            for root, dirs, files in os.walk(folder_path):
                 for file in files:
                     if file.lower().endswith('.zip'):
                         zip_path = os.path.join(root, file)
                         yield zip_path
         except (PermissionError, OSError) as e:
-            logger.warning(f"Cannot access {takeout_folder}: {e}")
+            logger.warning(f"Cannot access {folder_path}: {e}")
+    
+    def find_all_zip_files_on_drive(self, drive: str) -> Generator[str, None, None]:
+        """Find all zip files on a drive (scans entire drive)"""
+        try:
+            for root, dirs, files in os.walk(drive):
+                # Skip system and hidden directories to avoid issues
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['System Volume Information', '$RECYCLE.BIN', 'Windows']]
+                
+                for file in files:
+                    if file.lower().endswith('.zip'):
+                        zip_path = os.path.join(root, file)
+                        yield zip_path
+        except (PermissionError, OSError) as e:
+            logger.warning(f"Cannot access {drive}: {e}")
     
     def is_video_file(self, filename: str) -> bool:
         """Check if a file is a video file based on its extension"""
@@ -276,7 +294,7 @@ class GoogleTakeoutScanner:
     
     def spinner_animation(self, message: str, color: str = Fore.CYAN, stop_event=None):
         """Display spinning animation with message"""
-        spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        spinner_chars = "|/-\\|/-\\"
         i = 0
         while not (stop_event and stop_event.is_set()):
             print(f"\r{color}{spinner_chars[i % len(spinner_chars)]} {message}{Style.RESET_ALL}", end="", flush=True)
@@ -293,27 +311,31 @@ class GoogleTakeoutScanner:
     
     def scan_drive_with_progress(self, drive: str, drive_color: str) -> Tuple[int, int, int]:
         """Scan a single drive with progress display"""
-        total_zips = 0
-        total_videos = 0
-        zip_count = 0
+        if self.root_folders_only:
+            return self._scan_drive_google_takeout_mode(drive, drive_color)
+        else:
+            return self._scan_drive_all_zip_mode(drive, drive_color)
+    
+    def _scan_drive_google_takeout_mode(self, drive: str, drive_color: str) -> Tuple[int, int, int]:
+        """Scan drive in GoogleTakeout mode - only scan GoogleTakeout folders in root directories"""
         folders_scanned = 0
         takeout_folders_found = 0
         
-        print(f"\n{drive_color}📁 Scanning drive: {drive}{Style.RESET_ALL}")
+        print(f"\n{drive_color}Scanning drive (GoogleTakeout mode): {drive}{Style.RESET_ALL}")
         
         # Start spinner for folder scanning
-        stop_event, spinner_thread = self.start_spinner(f"Scanning folders on {drive}...", drive_color)
+        stop_event, spinner_thread = self.start_spinner(f"Scanning for GoogleTakeout folders on {drive}...", drive_color)
         
-        # First pass: find GoogleTakeout folders and count zip files
+        # First pass: find GoogleTakeout folders and their zip files
         all_zips = []
         takeout_paths = []
         
-        for takeout_folder, folder_count in self.find_google_takeout_folders([drive]):
+        for takeout_path, folder_count in self.find_google_takeout_folders([drive]):
             folders_scanned = folder_count
             takeout_folders_found += 1
-            takeout_paths.append(takeout_folder)
+            takeout_paths.append(takeout_path)
             
-            for zip_path in self.find_zip_files(takeout_folder):
+            for zip_path in self.find_zip_files_in_folder(takeout_path):
                 all_zips.append(zip_path)
         
         # Stop spinner
@@ -323,26 +345,65 @@ class GoogleTakeoutScanner:
         
         # Display scan results
         if folders_scanned > 0:
-            print(f"{drive_color}   📂 Scanned {folders_scanned:,} folders{Style.RESET_ALL}")
+            print(f"{drive_color}   Scanned {folders_scanned:,} root folders{Style.RESET_ALL}")
         
         if takeout_folders_found == 0:
-            print(f"{Fore.YELLOW}   ⚠️  No GoogleTakeout folders found on {drive}")
+            print(f"{Fore.YELLOW}   No GoogleTakeout folders found on {drive}")
             return 0, 0, folders_scanned
         
         # Highlight found GoogleTakeout folders
         for takeout_path in takeout_paths:
             short_path = takeout_path.replace(drive, "").lstrip(os.sep)
-            print(f"{Fore.GREEN}   🎯 Found GoogleTakeout: {Style.BRIGHT}{short_path}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}   Found GoogleTakeout: {Style.BRIGHT}{short_path}{Style.RESET_ALL}")
         
         total_zip_files = len(all_zips)
         
         if total_zip_files == 0:
-            print(f"{Fore.YELLOW}   ⚠️  No zip files found in GoogleTakeout folders")
+            print(f"{Fore.YELLOW}   No zip files found in GoogleTakeout folders")
             return 0, 0, folders_scanned
         
-        print(f"{Fore.CYAN}   📦 Found {total_zip_files} zip files to process")
+        print(f"{Fore.CYAN}   Found {total_zip_files} zip files to process")
         
-        # Second pass: process with progress bar
+        return self._process_zip_files(all_zips, drive, drive_color, total_zip_files)
+    
+    def _scan_drive_all_zip_mode(self, drive: str, drive_color: str) -> Tuple[int, int, int]:
+        """Scan drive in all-zip mode (scan all zip files on drive)"""
+        total_zips = 0
+        total_videos = 0
+        zip_count = 0
+        
+        print(f"\n{drive_color}Scanning drive (all zip files): {drive}{Style.RESET_ALL}")
+        
+        # Start spinner for zip file discovery
+        stop_event, spinner_thread = self.start_spinner(f"Finding all zip files on {drive}...", drive_color)
+        
+        # Find all zip files on the drive
+        all_zips = []
+        for zip_path in self.find_all_zip_files_on_drive(drive):
+            all_zips.append(zip_path)
+        
+        # Stop spinner
+        stop_event.set()
+        spinner_thread.join(timeout=0.5)
+        print(f"\r{' ' * 80}\r", end="")  # Clear spinner line
+        
+        total_zip_files = len(all_zips)
+        
+        if total_zip_files == 0:
+            print(f"{Fore.YELLOW}   No zip files found on {drive}")
+            return 0, 0, 0
+        
+        print(f"{Fore.CYAN}   Found {total_zip_files} zip files to process")
+        
+        return self._process_zip_files(all_zips, drive, drive_color, total_zip_files)
+    
+    def _process_zip_files(self, all_zips: List[str], drive: str, drive_color: str, total_zip_files: int) -> Tuple[int, int, int]:
+        """Process a list of zip files and return statistics"""
+        total_zips = 0
+        total_videos = 0
+        zip_count = 0
+        
+        # Process with progress bar
         for zip_path in all_zips:
             zip_count += 1
             progress = zip_count / total_zip_files
@@ -363,11 +424,11 @@ class GoogleTakeoutScanner:
         self.print_progress_bar(1.0, 40, drive, total_zip_files, total_zip_files, drive_color)
         
         if total_videos > 0:
-            print(f"\n{Fore.GREEN}   ✅ Processed {total_zips} zip files, found {total_videos:,} videos")
+            print(f"\n{Fore.GREEN}   Processed {total_zips} zip files, found {total_videos:,} videos")
         else:
-            print(f"\n{Fore.YELLOW}   ✅ No video files found in {total_zips} zip files")
+            print(f"\n{Fore.YELLOW}   No video files found in {total_zips} zip files")
         
-        return total_zips, total_videos, folders_scanned
+        return total_zips, total_videos, 0
     
     def get_database_summary(self):
         """Get current database summary"""
@@ -411,14 +472,15 @@ class GoogleTakeoutScanner:
         ]
         
         print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
-        print(f"{Style.BRIGHT}{Fore.CYAN}🗄️  DATABASE STATUS (BEFORE SCAN){Style.RESET_ALL}")
-        print(f"   📁 Drives indexed: {Fore.YELLOW}{initial_stats['drives']}{Style.RESET_ALL}")
-        print(f"   📦 Zip files: {Fore.YELLOW}{initial_stats['zip_files']}{Style.RESET_ALL}")
-        print(f"   🎬 Video files: {Fore.YELLOW}{initial_stats['video_files']:,}{Style.RESET_ALL}")
-        print(f"   💾 Total size: {Fore.YELLOW}{initial_stats['total_size_gb']:.2f} GB{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.CYAN}DATABASE STATUS (BEFORE SCAN){Style.RESET_ALL}")
+        print(f"   Drives indexed: {Fore.YELLOW}{initial_stats['drives']}{Style.RESET_ALL}")
+        print(f"   Zip files: {Fore.YELLOW}{initial_stats['zip_files']}{Style.RESET_ALL}")
+        print(f"   Video files: {Fore.YELLOW}{initial_stats['video_files']:,}{Style.RESET_ALL}")
+        print(f"   Total size: {Fore.YELLOW}{initial_stats['total_size_gb']:.2f} GB{Style.RESET_ALL}")
         print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
         
-        print(f"\n{Style.BRIGHT}{Fore.WHITE}🔍 Starting scan of {len(drives)} drives...{Style.RESET_ALL}")
+        scan_mode_desc = "GoogleTakeout folders only" if self.root_folders_only else "all zip files on drives"
+        print(f"\n{Style.BRIGHT}{Fore.WHITE}Starting scan of {len(drives)} drives ({scan_mode_desc})...{Style.RESET_ALL}")
         print(f"{Fore.CYAN}Drive scan order: {', '.join(drives)}{Style.RESET_ALL}")
         
         start_time = time.time()
@@ -443,19 +505,19 @@ class GoogleTakeoutScanner:
         
         # Final summary
         print(f"\n{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
-        print(f"{Style.BRIGHT}{Fore.GREEN}🎉 SCAN COMPLETE!{Style.RESET_ALL}")
-        print(f"{Style.BRIGHT}{Fore.CYAN}📊 SCAN RESULTS:{Style.RESET_ALL}")
-        print(f"   🔍 Drives scanned: {Fore.YELLOW}{len(drives)}{Style.RESET_ALL}")
-        print(f"   📂 Folders examined: {Fore.YELLOW}{total_folders_scanned:,}{Style.RESET_ALL}")
-        print(f"   📦 Zip files processed: {Fore.YELLOW}{total_zips}{Style.RESET_ALL}")
-        print(f"   🎬 Video files found: {Fore.YELLOW}{total_videos:,}{Style.RESET_ALL}")
-        print(f"   ⏱️  Time elapsed: {Fore.YELLOW}{int(minutes):02d}:{int(seconds):02d}{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.GREEN}SCAN COMPLETE!{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.CYAN}SCAN RESULTS:{Style.RESET_ALL}")
+        print(f"   Drives scanned: {Fore.YELLOW}{len(drives)}{Style.RESET_ALL}")
+        print(f"   Folders examined: {Fore.YELLOW}{total_folders_scanned:,}{Style.RESET_ALL}")
+        print(f"   Zip files processed: {Fore.YELLOW}{total_zips}{Style.RESET_ALL}")
+        print(f"   Video files found: {Fore.YELLOW}{total_videos:,}{Style.RESET_ALL}")
+        print(f"   Time elapsed: {Fore.YELLOW}{int(minutes):02d}:{int(seconds):02d}{Style.RESET_ALL}")
         
-        print(f"\n{Style.BRIGHT}{Fore.CYAN}🗄️  DATABASE STATUS (AFTER SCAN){Style.RESET_ALL}")
-        print(f"   📁 Total drives indexed: {Fore.YELLOW}{final_stats['drives']}{Style.RESET_ALL}")
-        print(f"   📦 Total zip files: {Fore.YELLOW}{final_stats['zip_files']}{Style.RESET_ALL} {Fore.GREEN}(+{new_zip_files}){Style.RESET_ALL}")
-        print(f"   🎬 Total video files: {Fore.YELLOW}{final_stats['video_files']:,}{Style.RESET_ALL} {Fore.GREEN}(+{new_video_files:,}){Style.RESET_ALL}")
-        print(f"   💾 Total size: {Fore.YELLOW}{final_stats['total_size_gb']:.2f} GB{Style.RESET_ALL} {Fore.GREEN}(+{new_size_gb:.2f} GB){Style.RESET_ALL}")
+        print(f"\n{Style.BRIGHT}{Fore.CYAN}DATABASE STATUS (AFTER SCAN){Style.RESET_ALL}")
+        print(f"   Total drives indexed: {Fore.YELLOW}{final_stats['drives']}{Style.RESET_ALL}")
+        print(f"   Total zip files: {Fore.YELLOW}{final_stats['zip_files']}{Style.RESET_ALL} {Fore.GREEN}(+{new_zip_files}){Style.RESET_ALL}")
+        print(f"   Total video files: {Fore.YELLOW}{final_stats['video_files']:,}{Style.RESET_ALL} {Fore.GREEN}(+{new_video_files:,}){Style.RESET_ALL}")
+        print(f"   Total size: {Fore.YELLOW}{final_stats['total_size_gb']:.2f} GB{Style.RESET_ALL} {Fore.GREEN}(+{new_size_gb:.2f} GB){Style.RESET_ALL}")
         print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
         
         logger.info(f"Scan complete. Processed {total_zips} zip files containing {total_videos} video files")
@@ -504,7 +566,7 @@ class GoogleTakeoutScanner:
         for i, (drive, zip_name, zip_path, file_name, file_size, file_path_in_zip) in enumerate(results, 1):
             size_mb = file_size / (1024 * 1024) if file_size else 0
             
-            print(f"{Style.BRIGHT}{Fore.CYAN}📹 Result #{i}{Style.RESET_ALL}")
+            print(f"{Style.BRIGHT}{Fore.CYAN}Result #{i}{Style.RESET_ALL}")
             print(f"   {Fore.YELLOW}Drive:{Style.RESET_ALL} {drive}")
             print(f"   {Fore.YELLOW}Zip File:{Style.RESET_ALL} {zip_name}")
             print(f"   {Fore.YELLOW}Full Zip Path:{Style.RESET_ALL} {zip_path}")
@@ -581,11 +643,11 @@ class GoogleTakeoutScanner:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Google Takeout Video Scanner')
+    parser = argparse.ArgumentParser(description='Video Archive Scanner - Scan root folders or all zip files for videos')
     parser.add_argument('--database', '-db', default='google_takeout_videos.db',
                        help='SQLite database path (default: google_takeout_videos.db)')
     parser.add_argument('--scan', action='store_true',
-                       help='Scan drives for GoogleTakeout folders and index video files')
+                       help='Scan drives for video files (root folders by default, or all zip files with --no-google-takeout)')
     parser.add_argument('--search', '-s', type=str,
                        help='Search for video files by name')
     parser.add_argument('--regex', action='store_true',
@@ -594,14 +656,19 @@ def main():
                        help='Show database statistics')
     parser.add_argument('--drives', action='store_true',
                        help='List all drive names in database with statistics')
+    parser.add_argument('--google-takeout', action='store_true', default=True,
+                       help='Search only GoogleTakeout folders in root directories (default: True)')
+    parser.add_argument('--no-google-takeout', dest='google_takeout', action='store_false',
+                       help='Scan all zip files on all drives instead of just GoogleTakeout folders')
     
     args = parser.parse_args()
     
-    scanner = GoogleTakeoutScanner(args.database)
+    scanner = VideoArchiveScanner(args.database, args.google_takeout)
     
     try:
         if args.scan:
-            logger.info("Starting drive scan...")
+            scan_mode = "GoogleTakeout folders" if args.google_takeout else "all zip files on all drives"
+            logger.info(f"Starting drive scan in {scan_mode} mode...")
             scanner.scan_all_drives()
         elif args.search:
             results = scanner.search_videos(args.search, args.regex)

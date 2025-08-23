@@ -1,11 +1,13 @@
 # PySearchVideos
 
-A Python tool for scanning and indexing video files within Google Takeout archives across multiple drives and storage locations.
+A Python tool for scanning and indexing video files within zip archives across multiple drives and storage locations. Supports two scanning modes: GoogleTakeout folders only (default) or comprehensive scanning of all zip files.
 
 ## Features
 
 - **Multi-drive scanning**: Automatically detects available drives on Windows, Linux, macOS, and WSL environments
-- **Google Takeout focus**: Specifically searches for GoogleTakeout folders in drive root directories
+- **Flexible scanning modes**: 
+  - **GoogleTakeout mode** (default): Scans zip files only in GoogleTakeout folders found in root directories of drives
+  - **All-zip mode**: Scans all zip files across entire drives when using `--no-google-takeout`
 - **Video file indexing**: Scans zip archives for video files with support for 20+ video formats
 - **SQLite database**: Stores file metadata in a searchable database
 - **Search functionality**: Find videos by filename with optional regex support
@@ -23,30 +25,38 @@ flowchart TD
     B -->|--stats| E[Show Statistics]
     B -->|--drives| F[List Indexed Drives]
     
-    C --> G[Scan for GoogleTakeout Folders]
-    G --> H[Find ZIP Archives]
-    H --> I[Extract Video File Metadata]
-    I --> J[Store in SQLite Database]
-    J --> K[Display Progress & Results]
+    C --> G{Scanning Mode}
+    G -->|GoogleTakeout Mode<br/>default| H[Scan GoogleTakeout Folders in Root Directories]
+    G -->|All-Zip Mode<br/>--no-google-takeout| I[Scan All ZIP Files on Drives]
     
-    D --> L{Search Type}
-    L -->|Text| M[Simple Text Search]
-    L -->|Regex| N[Regex Pattern Search]
-    M --> O[Display Search Results]
-    N --> O
+    H --> J[Find ZIP Archives in GoogleTakeout Folders]
+    I --> K[Find All ZIP Archives on Drives]
     
-    E --> P[Show Database Statistics]
-    F --> Q[List Available Drives]
+    J --> L[Extract Video File Metadata]
+    K --> L
+    L --> M[Store in SQLite Database]
+    M --> N[Display Progress & Results]
     
-    K --> R[End]
-    O --> R
-    P --> R
+    D --> O{Search Type}
+    O -->|Text| P[Simple Text Search]
+    O -->|Regex| Q[Regex Pattern Search]
+    P --> R[Display Search Results]
     Q --> R
     
+    E --> S[Show Database Statistics]
+    F --> T[List Available Drives]
+    
+    N --> U[End]
+    R --> U
+    S --> U
+    T --> U
+    
     style A fill:#e1f5fe
-    style J fill:#c8e6c9
-    style O fill:#fff3e0
-    style R fill:#ffebee
+    style M fill:#c8e6c9
+    style R fill:#fff3e0
+    style U fill:#ffebee
+    style G fill:#fce4ec
+    style I fill:#fff8e1
 ```
 
 ## Supported Video Formats
@@ -70,44 +80,72 @@ pip install colorama  # Optional, for colored output
 
 ## Usage
 
-### Scan drives for Google Takeout archives
+### Scan drives for Google Takeout archives (default mode)
 
 ```bash
-./google_takeout_scanner.py --scan
+./py_zip_scanner.py --scan
 ```
 
 This will:
-- Scan all available drives for GoogleTakeout folders
-- Index all video files found in zip archives
+- Scan all available drives for GoogleTakeout folders in root directories
+- Index all video files found in zip archives within GoogleTakeout folders (recursively)
 - Store results in `google_takeout_videos.db`
+
+### Scan all zip files on all drives
+
+```bash
+./py_zip_scanner.py --scan --no-google-takeout
+```
+
+This will:
+- Scan ALL zip files on ALL available drives and all folders (comprehensive scan)
+- Index all video files found in any zip archive anywhere on the drives
+- Store results in `google_takeout_videos.db`
+- **Warning**: This mode may take significantly longer and process many more files
 
 ### Search for video files
 
 ```bash
 # Simple text search
-./google_takeout_scanner.py --search "vacation"
+./py_zip_scanner.py --search "vacation"
 
 # Regex search
-./google_takeout_scanner.py --search "IMG_\d{4}\.mp4" --regex
+./py_zip_scanner.py --search "IMG_\d{4}\.mp4" --regex
 ```
 
 ### View database statistics
 
 ```bash
-./google_takeout_scanner.py --stats
+./py_zip_scanner.py --stats
 ```
 
 ### List indexed drives
 
 ```bash
-./google_takeout_scanner.py --drives
+./py_zip_scanner.py --drives
 ```
 
 ### Custom database location
 
 ```bash
-./google_takeout_scanner.py --database /path/to/custom.db --scan
+./py_zip_scanner.py --database /path/to/custom.db --scan
 ```
+
+### Command line options
+
+```bash
+./py_zip_scanner.py --help
+```
+
+Available options:
+- `--scan`: Start scanning drives for video files
+- `--search "pattern"`: Search for video files by name
+- `--regex`: Use regex patterns for search
+- `--stats`: Show database statistics
+- `--drives`: List indexed drives with statistics
+- `--database PATH`: Specify custom database location
+- `--google-takeout`: Search only GoogleTakeout folders in root directories (default: enabled)
+- `--no-google-takeout`: Scan all zip files on all drives and folders (overrides default behavior)
 
 ## Database Schema
 
@@ -132,6 +170,6 @@ The tool provides colored terminal output with:
 
 ## Files
 
-- `google_takeout_scanner.py`: Main scanner application
+- `py_zip_scanner.py`: Main scanner application
 - `test_drives.py`: Test script for drive detection functionality
 - `google_takeout_videos.db`: SQLite database (created automatically)
