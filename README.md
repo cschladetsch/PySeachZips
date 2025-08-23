@@ -43,7 +43,7 @@ A high-performance Python tool for scanning and indexing files within ZIP archiv
 
 ```mermaid
 flowchart TD
-    A[Start PySearchVideos] --> B{Operation Mode}
+    A[Start PySearchZips] --> B{Operation Mode}
     
     B -->|--scan| C[Detect Available Drives]
     B -->|--search| D[Query Database]
@@ -246,6 +246,65 @@ Available options:
 - `--export-csv FILE`: Export search results to CSV file
 - `--find-duplicates`: Find and display duplicate video files
 - `--validate-db`: Validate database integrity
+
+## Configuration
+
+PySearchZips uses a JSON configuration file to customize scanning behavior and performance settings.
+
+### Automatic Configuration Setup
+On first run, the tool automatically copies `config_default.json` to `config.json` for local customization:
+
+```bash
+# First run automatically creates config.json
+./py_zip_scanner.py --scan
+```
+
+### Configuration Options
+
+The `config.json` file contains the following configurable sections:
+
+#### Performance Settings
+- `max_workers`: Number of parallel scanning threads (default: 4)
+- `batch_size`: Database batch insertion size for performance (default: 1000)
+- `memory_limit`: Maximum memory usage in bytes
+- `progress_update_interval`: Progress display update frequency in seconds
+
+#### Scanning Behavior
+- `video_extensions`: List of video file extensions to scan
+- `excluded_directories`: Directory patterns to skip during scanning
+- `excluded_drives`: Specific drive letters or mount points to exclude
+- `follow_symlinks`: Whether to follow symbolic links (default: false)
+
+#### Search Settings
+- `case_sensitive`: Default case sensitivity for searches (default: false)
+- `regex_enabled`: Enable regex support by default (default: false)
+
+### Using Custom Configuration
+
+```bash
+# Use the automatically created config.json (recommended)
+./py_zip_scanner.py --scan
+
+# Use a specific config file
+./py_zip_scanner.py --config high_performance.json --scan
+
+# Edit your local configuration
+nano config.json
+```
+
+### Example Configuration Structure
+```json
+{
+  "performance": {
+    "max_workers": 6,
+    "batch_size": 2000
+  },
+  "scanning": {
+    "excluded_directories": ["System Volume Information", "$RECYCLE.BIN"],
+    "video_extensions": [".mp4", ".avi", ".mov"]
+  }
+}
+```
 
 ## Database Schema
 
