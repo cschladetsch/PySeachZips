@@ -1,6 +1,6 @@
 # PySearchZips
 
-A high-performance Python tool for scanning and indexing files within ZIP archives across multiple drives and storage locations. Originally designed for Google Takeout video archives, it now supports scanning ANY file type with advanced filtering, parallel processing, and duplicate detection.
+A high-performance Python tool for scanning and indexing files within ZIP archives across multiple drives and storage locations. Scan ANY file type with advanced pattern matching, regex support, real-time progress tracking, and a clean modular architecture.
 
 ## Demo
 
@@ -9,35 +9,35 @@ A high-performance Python tool for scanning and indexing files within ZIP archiv
 ## Features
 
 ### Performance & Scanning
-- **Parallel processing**: Multi-threaded scanning with configurable worker count
-- **Incremental updates**: Only scan modified ZIP files for fast re-indexing  
-- **Memory-efficient**: Configurable memory limits for large archive processing
+- **High-speed processing**: Optimized for large ZIP archives (4GB+ files)
+- **Real-time progress**: Live status updates with heartbeat indicators
+- **Memory-efficient**: Smart processing without expensive hashing operations
 - **Batch operations**: Optimized database insertions for maximum speed
 
 ### Flexible File Support
-- **Any file type**: Videos (default) or ALL files in ZIP archives (`--all-files`)
+- **Any file type**: Videos (default) or ALL file types in ZIP archives (`--all-files`)
 - **Multiple scanning modes**:
   - **GoogleTakeout mode** (default): Scans GoogleTakeout folders in root directories
   - **All-zip mode**: Comprehensive scanning of all ZIP files across drives
-- **Smart filtering**: Filter by file extensions, size ranges, and modification dates
+- **Smart filtering**: Filter by file extensions, size ranges, and pattern matching
 
 ### Advanced Search & Analysis
 - **Powerful search**: Text patterns, regex support, and multi-criteria filtering
-- **Duplicate detection**: Find identical files using content hashing (MD5)
+- **File listing**: List all indexed files with `--list-videos`
 - **Size-based filtering**: Min/max file size constraints for search results
-- **CSV export**: Export search results for analysis in spreadsheets
+- **Drive information**: Shows volume labels and sizes during scanning
 
 ### Configuration & Customization
-- **Auto-configuration**: Copies default settings to local `config.json` on first run
+- **Modular architecture**: Clean separation of database, scanning, and progress modules
+- **Auto-configuration**: Load settings from `config.json` 
 - **Drive/folder exclusion**: Skip specific drives or directory patterns
 - **Extensible**: Custom video extensions and excluded directory patterns
-- **Multiple databases**: Support for multiple database files
 
 ### User Experience
-- **Real-time progress**: Colored progress bars and live status updates
+- **Real-time progress**: Colored progress bars with heartbeat indicators for long operations
 - **Cross-platform**: Windows, Linux, macOS, and Windows Subsystem for Linux (WSL)
-- **Database validation**: Integrity checking and repair capabilities
-- **Quiet/dry-run modes**: Silent operation and preview modes
+- **Drive information**: Shows volume labels and total drive sizes
+- **Quiet mode**: Silent operation with minimal output
 
 ## Workflow
 
@@ -45,44 +45,118 @@ A high-performance Python tool for scanning and indexing files within ZIP archiv
 flowchart TD
     A[Start PySearchZips] --> B{Operation Mode}
     
-    B -->|--scan| C[Detect Available Drives]
+    B -->|--scan| C[Initialize Components]
     B -->|--search| D[Query Database]
     B -->|--stats| E[Show Statistics]
-    B -->|--drives| F[List Indexed Drives]
+    B -->|--list-videos| F[List Video Files]
+    B -->|--list-zips| G[List ZIP Archives]
+    B -->|--extract| H[Extract Files by Name]
+    B -->|--extract-uuid| I[Extract by ZIP UUID]
+    B -->|--extract-all| J[Extract All Files]
     
-    C --> G{Scanning Mode}
-    G -->|GoogleTakeout Mode<br/>default| H[Scan GoogleTakeout Folders in Root Directories]
-    G -->|All-Zip Mode<br/>--no-google-takeout| I[Scan All ZIP Files on Drives]
+    C --> C1[DriveScanner]
+    C --> C2[ZipFileScanner]
+    C --> C3[DatabaseManager]
+    C --> C4[ProgressDisplay]
     
-    H --> J[Find ZIP Archives in GoogleTakeout Folders]
-    I --> K[Find All ZIP Archives on Drives]
+    C1 --> G[Detect Available Drives]
+    G --> H{Scanning Mode}
+    H -->|GoogleTakeout Mode<br/>default| I[Find GoogleTakeout Folders]
+    H -->|All-Zip Mode<br/>--no-google-takeout| J[Find All ZIP Files]
     
-    J --> L[Extract Video File Metadata]
-    K --> L
-    L --> M[Store in SQLite Database]
-    M --> N[Display Progress & Results]
+    I --> K[Process ZIP Files with Progress]
+    J --> K
     
-    D --> O{Search Type}
-    O -->|Text| P[Simple Text Search]
-    O -->|Regex| Q[Regex Pattern Search]
-    P --> R[Display Search Results]
-    Q --> R
+    K --> L[Real-time Progress Updates]
+    L --> M[Scan ZIP Contents]
+    M --> N[Show Heartbeat Status]
+    N --> O[Insert to Database]
+    O --> P[Display Results]
     
-    E --> S[Show Database Statistics]
-    F --> T[List Available Drives]
+    D --> Q{Search Type}
+    Q -->|Text Pattern| R[Simple Text Search]
+    Q -->|Regex Pattern| S[Regex Pattern Search]
+    R --> T[Display Search Results]
+    S --> T
     
-    N --> U[End]
-    R --> U
-    S --> U
-    T --> U
+    E --> U[Show Database Statistics]
+    F --> V[List All Videos with Details]
+    G --> W[Show ZIP Archives with UUIDs]
+    
+    H --> X[Search Files by Name Pattern]
+    X --> Y[Interactive File Selection]
+    Y --> Z[Extract Selected Files]
+    
+    I --> AA[Get ZIP Info by UUID]
+    AA --> BB[List Files in ZIP]
+    BB --> CC[Interactive File Selection]
+    CC --> DD[Extract from Specific ZIP]
+    
+    J --> EE[Confirm Full Extraction]
+    EE --> FF[Extract All Files from All ZIPs]
+    
+    P --> GG[End]
+    T --> GG
+    U --> GG
+    V --> GG
+    W --> GG
+    Z --> GG
+    DD --> GG
+    FF --> GG
     
     style A fill:#e1f5fe
-    style M fill:#c8e6c9
-    style R fill:#fff3e0
-    style U fill:#ffebee
-    style G fill:#fce4ec
-    style I fill:#fff8e1
+    style C fill:#f3e5f5
+    style O fill:#c8e6c9
+    style T fill:#fff3e0
+    style W fill:#ffebee
+    style H fill:#fce4ec
+    style L fill:#e8f5e8
 ```
+
+## Architecture
+
+PySearchZips uses a clean modular architecture for maintainability and extensibility:
+
+```mermaid
+graph TB
+    subgraph "Main Application"
+        A[zip_scanner.py<br/>384 lines<br/>CLI & Orchestration]
+    end
+    
+    subgraph "Core Modules"
+        B[database.py<br/>179 lines<br/>SQLite Operations]
+        C[scanner.py<br/>241 lines<br/>Drive & ZIP Scanning]
+        D[progress.py<br/>86 lines<br/>Progress & Status Display]
+    end
+    
+    subgraph "External Dependencies"
+        E[SQLite Database<br/>zip_files.db]
+        F[Configuration<br/>config.json]
+        G[File System<br/>Drives & ZIP Files]
+    end
+    
+    A --> B
+    A --> C
+    A --> D
+    B --> E
+    A --> F
+    C --> G
+    D --> G
+    
+    style A fill:#e1f5fe
+    style B fill:#c8e6c9
+    style C fill:#fff3e0
+    style D fill:#f3e5f5
+    style E fill:#ffebee
+    style F fill:#fce4ec
+    style G fill:#e8f5e8
+```
+
+### Module Responsibilities
+- **`zip_scanner.py`**: Main application, CLI parsing, and component orchestration
+- **`database.py`**: All SQLite operations, queries, and data management
+- **`scanner.py`**: Drive detection, ZIP file discovery, and content scanning
+- **`progress.py`**: Real-time progress display, heartbeat, and status reporting
 
 ## Supported Video Formats
 
@@ -109,20 +183,23 @@ pip install colorama  # Optional, for colored output
 
 ```bash
 # First run: Auto-creates config.json from defaults
-./py_zip_scanner.py --scan
+./zip_scanner.py --scan
 
-# Search for videos with "vacation" in the name
-./py_zip_scanner.py --search "vacation"
+# Search for files with "vacation" in the name
+./zip_scanner.py --search "vacation"
+
+# List all indexed files
+./zip_scanner.py --list-videos
 
 # Find all .txt files in ZIP archives
-./py_zip_scanner.py --search ".txt" --file-types txt --all-files
+./zip_scanner.py --search ".txt" --file-types txt --all-files
 ```
 
 ### Scanning Modes
 
 #### GoogleTakeout Mode (Default)
 ```bash
-./py_zip_scanner.py --scan
+./zip_scanner.py --scan
 ```
 - Scans GoogleTakeout folders in root directories of all drives
 - Fast, focused scanning for Google Takeout archives
@@ -130,7 +207,7 @@ pip install colorama  # Optional, for colored output
 
 #### All-ZIP Mode  
 ```bash  
-./py_zip_scanner.py --scan --no-google-takeout
+./zip_scanner.py --scan --no-google-takeout
 ```
 - Comprehensive scan of ALL ZIP files across ALL drives
 - **Warning**: Significantly longer scan time
@@ -138,7 +215,7 @@ pip install colorama  # Optional, for colored output
 
 #### All File Types
 ```bash
-./py_zip_scanner.py --scan --all-files --no-google-takeout
+./zip_scanner.py --scan --all-files --no-google-takeout
 ```
 - Scans ALL file types in ZIP archives (not just videos)
 - Perfect for document archives, code repositories, etc.
@@ -147,37 +224,58 @@ pip install colorama  # Optional, for colored output
 
 ```bash
 # Simple text search
-./py_zip_scanner.py --search "vacation"
+./zip_scanner.py --search "vacation"
 
 # Regex search  
-./py_zip_scanner.py --search "IMG_\d{4}\.mp4" --regex
+./zip_scanner.py --search "IMG_\d{4}\.mp4" --regex
 
 # Size-based filtering (files > 100MB)
-./py_zip_scanner.py --search ".*" --regex --min-size 104857600
+./zip_scanner.py --search ".*" --regex --min-size 104857600
 
 # Search specific file types
-./py_zip_scanner.py --search "document" --file-types pdf docx txt --all-files
+./zip_scanner.py --search "document" --file-types pdf docx txt --all-files
 
-# Export results to CSV
-./py_zip_scanner.py --search "vacation" --export-csv results.csv
 ```
 
-### View database statistics
+### Database Operations
 
 ```bash
-./py_zip_scanner.py --stats
+# View database statistics
+./zip_scanner.py --stats
+
+# List all files in database
+./zip_scanner.py --list-videos
+
+# List first 50 files only
+./zip_scanner.py --list-videos --limit 50
 ```
 
-### List indexed drives
+### File Extraction
 
 ```bash
-./py_zip_scanner.py --drives
+# Extract a specific file by name
+./zip_scanner.py --extract "Go Game"
+
+# Extract with custom output directory  
+./zip_scanner.py --extract "Chess" --output-dir "/home/user/videos"
+
+# List ZIP archives to find UUIDs
+./zip_scanner.py --list-zips --limit 10
+
+# Extract all files from a specific ZIP by UUID
+./zip_scanner.py --extract-uuid "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+# Extract specific files from ZIP by UUID with filter
+./zip_scanner.py --extract-uuid "a1b2c3d4-e5f6-7890-abcd-ef1234567890" --file-filter "2023"
+
+# Extract ALL files from ALL ZIP archives (WARNING: Large operation!)
+./zip_scanner.py --extract-all --output-dir "/backup/extracted"
 ```
 
 ### Custom database location
 
 ```bash
-./py_zip_scanner.py --database /path/to/custom.db --scan
+./zip_scanner.py --database /path/to/custom.db --scan
 ```
 
 ### Advanced features
@@ -185,67 +283,83 @@ pip install colorama  # Optional, for colored output
 #### Configuration Management
 ```bash
 # First run automatically creates config.json from defaults
-./py_zip_scanner.py --scan
+./zip_scanner.py --scan
 
 # Edit your local configuration (gitignored)
 nano config.json
 
 # Use automatically (no --config flag needed)
-./py_zip_scanner.py --scan
+./zip_scanner.py --scan
 
 # Use specific config file
-./py_zip_scanner.py --config high_performance.json --scan
+./zip_scanner.py --config high_performance.json --scan
 ```
 
 #### Find duplicate videos
 ```bash
 # Find videos with identical content (based on file hash)
-./py_zip_scanner.py --find-duplicates
+./zip_scanner.py --find-duplicates
 ```
 
 #### Export search results
 ```bash
 # Search and export results to CSV
-./py_zip_scanner.py --search "vacation" --export-csv results.csv
+./zip_scanner.py --search "vacation" --export-csv results.csv
 ```
 
 #### Database validation
 ```bash
 # Check database integrity and find missing files
-./py_zip_scanner.py --validate-db
+./zip_scanner.py --validate-db
 ```
 
 #### Quiet and dry-run modes
 ```bash
 # Preview what would be scanned without actually scanning
-./py_zip_scanner.py --scan --dry-run
+./zip_scanner.py --scan --dry-run
 
 # Run in quiet mode with minimal output
-./py_zip_scanner.py --scan --quiet
+./zip_scanner.py --scan --quiet
 ```
 
 ### Command line options
 
 ```bash
-./py_zip_scanner.py --help
+./zip_scanner.py --help
 ```
 
 Available options:
-- `--scan`: Start scanning drives for video files
-- `--search "pattern"`: Search for video files by name
+
+**Operations:**
+- `--scan`: Start scanning drives for ZIP files
+- `--search "pattern"`: Search for files by name pattern
+- `--stats`: Show database statistics  
+- `--list-videos`: List all indexed files in database
+- `--list-zips`: List all ZIP archives with their UUIDs
+
+**Extraction Operations:**
+- `--extract "filename"`: Extract file(s) matching name pattern
+- `--extract-uuid UUID`: Extract files from specific ZIP by UUID
+- `--extract-all`: Extract ALL files from ALL ZIP archives (use with caution!)
+- `--output-dir PATH`: Output directory for extracted files (default: c:\temp or /tmp)
+- `--file-filter "pattern"`: Filter files when using --extract-uuid
+
+**Search Options:**
 - `--regex`: Use regex patterns for search
-- `--stats`: Show database statistics
-- `--drives`: List indexed drives with statistics
-- `--database PATH`: Specify custom database location (default: zip_files.db)
-- `--config PATH`: Load configuration from JSON file
-- `--google-takeout`: Search only GoogleTakeout folders in root directories (default: enabled)
-- `--no-google-takeout`: Scan all zip files on all drives and folders (overrides default behavior)
+- `--min-size SIZE`: Minimum file size in bytes
+- `--max-size SIZE`: Maximum file size in bytes
+- `--file-types TYPE [TYPE...]`: Filter by file extensions (e.g., mp4 avi)
+- `--limit N`: Limit number of results shown
+
+**Scanning Options:**
+- `--google-takeout`: Search only GoogleTakeout folders (default)
+- `--no-google-takeout`: Scan all ZIP files on drives
+- `--all-files`: Scan all file types (default scans video files only)
 - `--quiet, -q`: Quiet mode - minimal output
-- `--dry-run`: Show what would be scanned without actually scanning
-- `--exclude-paths`: Additional paths to exclude from scanning
-- `--export-csv FILE`: Export search results to CSV file
-- `--find-duplicates`: Find and display duplicate video files
-- `--validate-db`: Validate database integrity
+
+**Configuration:**
+- `--database PATH`: Specify database location (default: zip_files.db)
+- `--config PATH`: Load configuration from JSON file
 
 ## Configuration
 
@@ -256,7 +370,7 @@ On first run, the tool automatically copies `config_default.json` to `config.jso
 
 ```bash
 # First run automatically creates config.json
-./py_zip_scanner.py --scan
+./zip_scanner.py --scan
 ```
 
 ### Configuration Options
@@ -283,10 +397,10 @@ The `config.json` file contains the following configurable sections:
 
 ```bash
 # Use the automatically created config.json (recommended)
-./py_zip_scanner.py --scan
+./zip_scanner.py --scan
 
 # Use a specific config file
-./py_zip_scanner.py --config high_performance.json --scan
+./zip_scanner.py --config high_performance.json --scan
 
 # Edit your local configuration
 nano config.json
@@ -331,10 +445,15 @@ The tool provides colored terminal output with:
 
 ## Files
 
-- `py_zip_scanner.py`: Main scanner application
-- `test_drives.py`: Test script for drive detection functionality
-- `config_default.json`: Default configuration (DO NOT EDIT)
-- `config.json`: Local configuration (gitignored, copy from default)
+### Core Application
+- `zip_scanner.py`: Main scanner application (384 lines) - CLI and orchestration
+- `database.py`: Database operations module (179 lines) - SQLite management  
+- `scanner.py`: Drive and ZIP scanning module (241 lines) - File system operations
+- `progress.py`: Progress display module (86 lines) - Status and heartbeat display
+
+### Configuration & Data
+- `config.json`: Local configuration (auto-created from defaults)
 - `zip_files.db`: SQLite database (created automatically)
-- `REVIEW.md`: Code review and usage summary
-- `EXAMPLES.md`: Comprehensive usage examples
+
+### Legacy/Backup
+- `zip_scanner_old.py`: Original monolithic version (backup)
