@@ -165,17 +165,31 @@ class VideoArchiveScanner:
             )
         ''')
         
-        # Create indexes for better search performance
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_zip_uuid ON file_contents(zip_uuid)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_name ON file_contents(file_name)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_drive_letter ON zip_files(drive_letter)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_hash ON file_contents(file_hash)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_zip_hash ON zip_files(file_hash)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_size ON file_contents(file_size)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_scan_date ON zip_files(scan_date)')
-        
-        # Add new columns to existing tables if they don't exist
+        # Add new columns to existing tables if they don't exist (must be before creating indexes)
         self._add_missing_columns()
+        
+        # Create indexes for better search performance (after columns exist)
+        try:
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_zip_uuid ON file_contents(zip_uuid)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_name ON file_contents(file_name)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drive_letter ON zip_files(drive_letter)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_size ON file_contents(file_size)')
+            
+            # Only create hash and scan_date indexes if columns exist
+            cursor.execute("PRAGMA table_info(file_contents)")
+            file_columns = {row[1] for row in cursor.fetchall()}
+            if 'file_hash' in file_columns:
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_hash ON file_contents(file_hash)')
+            
+            cursor.execute("PRAGMA table_info(zip_files)")
+            zip_columns = {row[1] for row in cursor.fetchall()}
+            if 'file_hash' in zip_columns:
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_zip_hash ON zip_files(file_hash)')
+            if 'scan_date' in zip_columns:
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_scan_date ON zip_files(scan_date)')
+                
+        except sqlite3.Error as e:
+            logger.warning(f"Failed to create some indexes: {e}")
         
         self.connection.commit()
         logger.info(f"Database initialized at: {self.database_path}")
@@ -184,39 +198,50 @@ class VideoArchiveScanner:
         """Add missing columns to existing tables for backwards compatibility"""
         cursor = self.connection.cursor()
         
-        # Get existing columns for zip_files table
-        cursor.execute("PRAGMA table_info(zip_files)")
-        existing_zip_columns = {row[1] for row in cursor.fetchall()}
-        
-        # Get existing columns for file_contents table  
-        cursor.execute("PRAGMA table_info(file_contents)")
-        existing_file_columns = {row[1] for row in cursor.fetchall()}
-        
-        # Add missing columns to zip_files
-        new_zip_columns = [
-            ('file_size', 'INTEGER DEFAULT 0'),
-            ('file_hash', 'TEXT'),
-            ('last_modified', 'TIMESTAMP'),
-            ('scan_date', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
-        ]
-        
-        for col_name, col_def in new_zip_columns:
-            if col_name not in existing_zip_columns:
-                cursor.execute(f'ALTER TABLE zip_files ADD COLUMN {col_name} {col_def}')
-                logger.info(f"Added column {col_name} to zip_files table")
-        
-        # Add missing columns to file_contents
-        new_file_columns = [
-            ('file_hash', 'TEXT'),
-            ('video_duration', 'REAL'),
-            ('video_resolution', 'TEXT'),
-            ('last_modified', 'TIMESTAMP')
-        ]
-        
-        for col_name, col_def in new_file_columns:
-            if col_name not in existing_file_columns:
-                cursor.execute(f'ALTER TABLE file_contents ADD COLUMN {col_name} {col_def}')
-                logger.info(f"Added column {col_name} to file_contents table")
+        try:
+            # Get existing columns for zip_files table
+            cursor.execute("PRAGMA table_info(zip_files)")
+            existing_zip_columns = {row[1] for row in cursor.fetchall()}
+            
+            # Get existing columns for file_contents table  
+            cursor.execute("PRAGMA table_info(file_contents)")
+            existing_file_columns = {row[1] for row in cursor.fetchall()}
+            
+            # Add missing columns to zip_files
+            new_zip_columns = [
+                ('file_size', 'INTEGER DEFAULT 0'),
+                ('file_hash', 'TEXT'),
+                ('last_modified', 'TIMESTAMP'),
+                ('scan_date', 'TIMESTAMP')
+            ]
+            
+            for col_name, col_def in new_zip_columns:
+                if col_name not in existing_zip_columns:
+                    try:
+                        cursor.execute(f'ALTER TABLE zip_files ADD COLUMN {col_name} {col_def}')
+                        logger.info(f"Added column {col_name} to zip_files table")
+                    except sqlite3.Error as e:
+                        logger.warning(f"Failed to add column {col_name} to zip_files: {e}")
+            
+            # Add missing columns to file_contents
+            new_file_columns = [
+                ('file_hash', 'TEXT'),
+                ('video_duration', 'REAL'),
+                ('video_resolution', 'TEXT'),
+                ('last_modified', 'TIMESTAMP')
+            ]
+            
+            for col_name, col_def in new_file_columns:
+                if col_name not in existing_file_columns:
+                    try:
+                        cursor.execute(f'ALTER TABLE file_contents ADD COLUMN {col_name} {col_def}')
+                        logger.info(f"Added column {col_name} to file_contents table")
+                    except sqlite3.Error as e:
+                        logger.warning(f"Failed to add column {col_name} to file_contents: {e}")
+                        
+        except sqlite3.Error as e:
+            logger.error(f"Error during schema migration: {e}")
+            # Continue anyway - the database might still be usable
     
     def get_available_drives(self) -> List[str]:
         """Get list of available drives based on the operating system"""
