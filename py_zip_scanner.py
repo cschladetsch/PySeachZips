@@ -18,8 +18,13 @@ import argparse
 import platform
 import time
 import threading
+import hashlib
+import json
+import csv
 from pathlib import Path
-from typing import List, Tuple, Generator, Optional
+from typing import List, Tuple, Generator, Optional, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import logging
 
 try:
@@ -47,18 +52,58 @@ VIDEO_EXTENSIONS = {
 }
 
 class VideoArchiveScanner:
-    def __init__(self, database_path: str = 'google_takeout_videos.db', root_folders_only: bool = True):
+    def __init__(self, database_path: str = 'zip_files.db', root_folders_only: bool = True, config_file: str = None):
         self.database_path = database_path
         self.root_folders_only = root_folders_only
         self.connection = None
+        
+        # Load configuration
+        self.config = self.load_config(config_file)
+        
+        # Override defaults with config
+        if config_file and 'database_path' in self.config:
+            self.database_path = self.config['database_path']
+        
         self.setup_database()
+    
+    def load_config(self, config_file: str = None) -> Dict[str, Any]:
+        """Load configuration from JSON file"""
+        default_config = {
+            "video_extensions": [
+                ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v",
+                ".3gp", ".3g2", ".asf", ".divx", ".f4v", ".m2ts", ".mts", ".ogv",
+                ".rm", ".rmvb", ".vob", ".xvid", ".mpg", ".mpeg", ".m1v", ".m2v"
+            ],
+            "excluded_directories": [
+                "System Volume Information", "$RECYCLE.BIN", "Windows", 
+                "node_modules", ".git", "__pycache__"
+            ],
+            "batch_size": 1000,
+            "max_memory_mb": 100,
+            "max_workers": 4,
+            "enable_thumbnails": False,
+            "enable_hashing": True,
+            "quiet_mode": False,
+            "dry_run": False
+        }
+        
+        if config_file and os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    user_config = json.load(f)
+                    default_config.update(user_config)
+                    logger.info(f"Loaded configuration from {config_file}")
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"Failed to load config file {config_file}: {e}")
+        
+        return default_config
     
     def setup_database(self):
         """Initialize SQLite database with required tables"""
         self.connection = sqlite3.connect(self.database_path)
         cursor = self.connection.cursor()
         
-        # Create zip_files table
+        # Create zip_files table with enhanced schema
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS zip_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,11 +111,15 @@ class VideoArchiveScanner:
                 zip_file_name TEXT NOT NULL,
                 zip_file_path TEXT NOT NULL,
                 uuid TEXT UNIQUE NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                file_hash TEXT,
+                last_modified TIMESTAMP,
+                scan_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Create file_contents table
+        # Create file_contents table with enhanced schema
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS file_contents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,8 +127,41 @@ class VideoArchiveScanner:
                 file_name TEXT NOT NULL,
                 file_size INTEGER NOT NULL,
                 file_path_in_zip TEXT NOT NULL,
+                file_hash TEXT,
+                video_duration REAL,
+                video_resolution TEXT,
+                last_modified TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (zip_uuid) REFERENCES zip_files (uuid)
+            )
+        ''')
+        
+        # Create scan_progress table for resume capability
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scan_progress (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                drive_letter TEXT NOT NULL,
+                last_processed_path TEXT,
+                scan_start TIMESTAMP,
+                scan_status TEXT DEFAULT 'in_progress',
+                total_folders INTEGER DEFAULT 0,
+                processed_folders INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Create scan_metrics table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scan_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                scan_mode TEXT NOT NULL,
+                drives_scanned INTEGER,
+                zip_files_found INTEGER,
+                video_files_found INTEGER,
+                total_size_bytes INTEGER,
+                scan_duration_seconds REAL,
+                errors_encountered INTEGER DEFAULT 0
             )
         ''')
         
@@ -87,9 +169,54 @@ class VideoArchiveScanner:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_zip_uuid ON file_contents(zip_uuid)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_name ON file_contents(file_name)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_drive_letter ON zip_files(drive_letter)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_hash ON file_contents(file_hash)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_zip_hash ON zip_files(file_hash)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_size ON file_contents(file_size)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_scan_date ON zip_files(scan_date)')
+        
+        # Add new columns to existing tables if they don't exist
+        self._add_missing_columns()
         
         self.connection.commit()
         logger.info(f"Database initialized at: {self.database_path}")
+    
+    def _add_missing_columns(self):
+        """Add missing columns to existing tables for backwards compatibility"""
+        cursor = self.connection.cursor()
+        
+        # Get existing columns for zip_files table
+        cursor.execute("PRAGMA table_info(zip_files)")
+        existing_zip_columns = {row[1] for row in cursor.fetchall()}
+        
+        # Get existing columns for file_contents table  
+        cursor.execute("PRAGMA table_info(file_contents)")
+        existing_file_columns = {row[1] for row in cursor.fetchall()}
+        
+        # Add missing columns to zip_files
+        new_zip_columns = [
+            ('file_size', 'INTEGER DEFAULT 0'),
+            ('file_hash', 'TEXT'),
+            ('last_modified', 'TIMESTAMP'),
+            ('scan_date', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+        ]
+        
+        for col_name, col_def in new_zip_columns:
+            if col_name not in existing_zip_columns:
+                cursor.execute(f'ALTER TABLE zip_files ADD COLUMN {col_name} {col_def}')
+                logger.info(f"Added column {col_name} to zip_files table")
+        
+        # Add missing columns to file_contents
+        new_file_columns = [
+            ('file_hash', 'TEXT'),
+            ('video_duration', 'REAL'),
+            ('video_resolution', 'TEXT'),
+            ('last_modified', 'TIMESTAMP')
+        ]
+        
+        for col_name, col_def in new_file_columns:
+            if col_name not in existing_file_columns:
+                cursor.execute(f'ALTER TABLE file_contents ADD COLUMN {col_name} {col_def}')
+                logger.info(f"Added column {col_name} to file_contents table")
     
     def get_available_drives(self) -> List[str]:
         """Get list of available drives based on the operating system"""
@@ -211,20 +338,63 @@ class VideoArchiveScanner:
     
     def is_video_file(self, filename: str) -> bool:
         """Check if a file is a video file based on its extension"""
-        return Path(filename).suffix.lower() in VIDEO_EXTENSIONS
+        video_extensions = set(self.config.get('video_extensions', VIDEO_EXTENSIONS))
+        return Path(filename).suffix.lower() in video_extensions
     
-    def scan_zip_for_videos(self, zip_path: str) -> List[Tuple[str, int, str]]:
-        """Scan a zip file for video files and return (name, size, path_in_zip) tuples"""
+    def calculate_file_hash(self, zip_path: str, file_path_in_zip: str) -> Optional[str]:
+        """Calculate MD5 hash of a file within a ZIP archive"""
+        if not self.config.get('enable_hashing', True):
+            return None
+            
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_file:
+                with zip_file.open(file_path_in_zip) as file_data:
+                    hash_md5 = hashlib.md5()
+                    # Read in chunks to avoid memory issues with large files
+                    max_size = self.config.get('max_memory_mb', 100) * 1024 * 1024
+                    bytes_read = 0
+                    
+                    for chunk in iter(lambda: file_data.read(4096), b""):
+                        if bytes_read + len(chunk) > max_size:
+                            logger.warning(f"File {file_path_in_zip} too large for hashing, skipping")
+                            return None
+                        hash_md5.update(chunk)
+                        bytes_read += len(chunk)
+                    
+                    return hash_md5.hexdigest()
+        except Exception as e:
+            logger.warning(f"Failed to hash file {file_path_in_zip} in {zip_path}: {e}")
+            return None
+    
+    def calculate_zip_hash(self, zip_path: str) -> Optional[str]:
+        """Calculate hash of ZIP file itself"""
+        if not self.config.get('enable_hashing', True):
+            return None
+            
+        try:
+            hash_md5 = hashlib.md5()
+            with open(zip_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hash_md5.update(chunk)
+            return hash_md5.hexdigest()
+        except Exception as e:
+            logger.warning(f"Failed to hash ZIP file {zip_path}: {e}")
+            return None
+    
+    def scan_zip_for_videos(self, zip_path: str) -> List[Tuple[str, int, str, Optional[str]]]:
+        """Scan a zip file for video files and return (name, size, path_in_zip, hash) tuples"""
         video_files = []
         
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_file:
                 for file_info in zip_file.infolist():
                     if not file_info.is_dir() and self.is_video_file(file_info.filename):
+                        file_hash = self.calculate_file_hash(zip_path, file_info.filename)
                         video_files.append((
                             os.path.basename(file_info.filename),
                             file_info.file_size,
-                            file_info.filename
+                            file_info.filename,
+                            file_hash
                         ))
         except (zipfile.BadZipFile, PermissionError, OSError) as e:
             logger.warning(f"Cannot read zip file {zip_path}: {e}")
@@ -252,8 +422,8 @@ class VideoArchiveScanner:
                     return part
             return '/'
     
-    def insert_zip_data(self, zip_path: str, video_files: List[Tuple[str, int, str]]) -> str:
-        """Insert zip file and its video files into the database"""
+    def insert_zip_data(self, zip_path: str, video_files: List[Tuple[str, int, str, Optional[str]]]) -> str:
+        """Insert zip file and its video files into the database with enhanced data"""
         if not video_files:
             return None
         
@@ -261,24 +431,104 @@ class VideoArchiveScanner:
         drive_letter = self.get_drive_letter(zip_path)
         zip_file_name = os.path.basename(zip_path)
         
+        # Get ZIP file metadata
+        zip_file_size = 0
+        zip_last_modified = None
+        zip_hash = None
+        
+        try:
+            stat_info = os.stat(zip_path)
+            zip_file_size = stat_info.st_size
+            zip_last_modified = datetime.fromtimestamp(stat_info.st_mtime)
+            zip_hash = self.calculate_zip_hash(zip_path)
+        except OSError as e:
+            logger.warning(f"Could not get metadata for {zip_path}: {e}")
+        
         cursor = self.connection.cursor()
         
-        # Insert zip file record
+        # Insert zip file record with enhanced data
         cursor.execute('''
-            INSERT INTO zip_files (drive_letter, zip_file_name, zip_file_path, uuid)
-            VALUES (?, ?, ?, ?)
-        ''', (drive_letter, zip_file_name, zip_path, zip_uuid))
+            INSERT INTO zip_files (drive_letter, zip_file_name, zip_file_path, uuid, 
+                                 file_size, file_hash, last_modified, scan_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (drive_letter, zip_file_name, zip_path, zip_uuid, 
+              zip_file_size, zip_hash, zip_last_modified, datetime.now()))
         
-        # Insert video files
-        for file_name, file_size, file_path_in_zip in video_files:
-            cursor.execute('''
-                INSERT INTO file_contents (zip_uuid, file_name, file_size, file_path_in_zip)
-                VALUES (?, ?, ?, ?)
-            ''', (zip_uuid, file_name, file_size, file_path_in_zip))
+        # Batch insert video files
+        video_data = []
+        for file_name, file_size, file_path_in_zip, file_hash in video_files:
+            video_data.append((zip_uuid, file_name, file_size, file_path_in_zip, file_hash, datetime.now()))
+        
+        cursor.executemany('''
+            INSERT INTO file_contents (zip_uuid, file_name, file_size, file_path_in_zip, file_hash, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', video_data)
         
         self.connection.commit()
-        logger.info(f"Inserted {len(video_files)} video files from {zip_file_name}")
+        
+        if not self.config.get('quiet_mode', False):
+            logger.info(f"Inserted {len(video_files)} video files from {zip_file_name}")
         return zip_uuid
+    
+    def batch_insert_zip_data(self, zip_data_list: List[Tuple[str, List[Tuple]]]) -> int:
+        """Batch insert multiple ZIP files and their contents"""
+        if not zip_data_list:
+            return 0
+        
+        cursor = self.connection.cursor()
+        zip_records = []
+        video_records = []
+        
+        for zip_path, video_files in zip_data_list:
+            if not video_files:
+                continue
+                
+            zip_uuid = str(uuid.uuid4())
+            drive_letter = self.get_drive_letter(zip_path)
+            zip_file_name = os.path.basename(zip_path)
+            
+            # Get ZIP metadata
+            zip_file_size = 0
+            zip_last_modified = None
+            zip_hash = None
+            
+            try:
+                stat_info = os.stat(zip_path)
+                zip_file_size = stat_info.st_size
+                zip_last_modified = datetime.fromtimestamp(stat_info.st_mtime)
+                zip_hash = self.calculate_zip_hash(zip_path)
+            except OSError:
+                pass
+            
+            zip_records.append((
+                drive_letter, zip_file_name, zip_path, zip_uuid,
+                zip_file_size, zip_hash, zip_last_modified, datetime.now()
+            ))
+            
+            for file_name, file_size, file_path_in_zip, file_hash in video_files:
+                video_records.append((
+                    zip_uuid, file_name, file_size, file_path_in_zip, file_hash, datetime.now()
+                ))
+        
+        # Batch insert ZIP files
+        cursor.executemany('''
+            INSERT INTO zip_files (drive_letter, zip_file_name, zip_file_path, uuid,
+                                 file_size, file_hash, last_modified, scan_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', zip_records)
+        
+        # Batch insert video files
+        cursor.executemany('''
+            INSERT INTO file_contents (zip_uuid, file_name, file_size, file_path_in_zip, file_hash, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', video_records)
+        
+        self.connection.commit()
+        
+        if not self.config.get('quiet_mode', False):
+            logger.info(f"Batch inserted {len(zip_records)} ZIP files with {len(video_records)} video files")
+        
+        return len(zip_records)
     
     def print_progress_bar(self, progress: float, width: int = 50, drive_name: str = "", 
                           current: int = 0, total: int = 0, color: str = Fore.GREEN):
@@ -636,6 +886,85 @@ class VideoArchiveScanner:
         print(f"{'TOTAL':<15} {total_zips:<12} {total_videos:<15} {total_size_all:>12.2f}")
         print(f"\nTotal drives: {total_drives}")
     
+    def validate_database(self) -> List[str]:
+        """Validate database integrity and return list of issues"""
+        issues = []
+        cursor = self.connection.cursor()
+        
+        try:
+            # Check for ZIP files that no longer exist
+            cursor.execute("SELECT zip_file_path FROM zip_files")
+            zip_paths = cursor.fetchall()
+            
+            missing_zips = 0
+            for (zip_path,) in zip_paths:
+                if not os.path.exists(zip_path):
+                    missing_zips += 1
+            
+            if missing_zips > 0:
+                issues.append(f"{missing_zips} ZIP files in database no longer exist on disk")
+            
+            # Check for orphaned file_contents records
+            cursor.execute('''
+                SELECT COUNT(*) FROM file_contents fc 
+                LEFT JOIN zip_files zf ON fc.zip_uuid = zf.uuid 
+                WHERE zf.uuid IS NULL
+            ''')
+            orphaned = cursor.fetchone()[0]
+            if orphaned > 0:
+                issues.append(f"{orphaned} orphaned video file records")
+            
+            # Check database integrity
+            cursor.execute("PRAGMA integrity_check")
+            integrity_result = cursor.fetchone()[0]
+            if integrity_result != 'ok':
+                issues.append(f"Database integrity issue: {integrity_result}")
+                
+        except sqlite3.Error as e:
+            issues.append(f"Database error during validation: {e}")
+        
+        return issues
+    
+    def find_duplicate_videos(self) -> List[List[Dict[str, Any]]]:
+        """Find duplicate video files based on hash"""
+        cursor = self.connection.cursor()
+        
+        # Find files with the same hash
+        cursor.execute('''
+            SELECT fc.file_hash, zf.zip_file_path, fc.file_name, fc.file_size
+            FROM file_contents fc
+            JOIN zip_files zf ON fc.zip_uuid = zf.uuid
+            WHERE fc.file_hash IS NOT NULL
+            GROUP BY fc.file_hash
+            HAVING COUNT(*) > 1
+            ORDER BY fc.file_hash, fc.file_size DESC
+        ''')
+        
+        duplicates = {}
+        for file_hash, zip_path, file_name, file_size in cursor.fetchall():
+            if file_hash not in duplicates:
+                duplicates[file_hash] = []
+            duplicates[file_hash].append({
+                'hash': file_hash,
+                'zip_path': zip_path,
+                'file_name': file_name,
+                'file_size': file_size
+            })
+        
+        return list(duplicates.values())
+    
+    def export_search_results_to_csv(self, results: List[Tuple], filename: str):
+        """Export search results to CSV file"""
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['Drive', 'ZIP File', 'ZIP Path', 'Video File', 'Size (MB)', 'Path in ZIP'])
+            
+            for drive, zip_name, zip_path, file_name, file_size, file_path_in_zip in results:
+                size_mb = file_size / (1024 * 1024) if file_size else 0
+                writer.writerow([drive, zip_name, zip_path, file_name, f"{size_mb:.1f}", file_path_in_zip])
+        
+        print(f"Exported {len(results)} search results to {filename}")
+    
     def close(self):
         """Close database connection"""
         if self.connection:
@@ -644,8 +973,10 @@ class VideoArchiveScanner:
 
 def main():
     parser = argparse.ArgumentParser(description='Video Archive Scanner - Scan root folders or all zip files for videos')
-    parser.add_argument('--database', '-db', default='google_takeout_videos.db',
-                       help='SQLite database path (default: google_takeout_videos.db)')
+    parser.add_argument('--database', '-db', default='zip_files.db',
+                       help='SQLite database path (default: zip_files.db)')
+    parser.add_argument('--config', '-c', type=str,
+                       help='Configuration file path (JSON format)')
     parser.add_argument('--scan', action='store_true',
                        help='Scan drives for video files (root folders by default, or all zip files with --no-google-takeout)')
     parser.add_argument('--search', '-s', type=str,
@@ -660,19 +991,61 @@ def main():
                        help='Search only GoogleTakeout folders in root directories (default: True)')
     parser.add_argument('--no-google-takeout', dest='google_takeout', action='store_false',
                        help='Scan all zip files on all drives instead of just GoogleTakeout folders')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='Quiet mode - minimal output')
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Show what would be scanned without actually scanning')
+    parser.add_argument('--exclude-paths', nargs='*',
+                       help='Additional paths to exclude from scanning')
+    parser.add_argument('--export-csv', type=str,
+                       help='Export search results to CSV file')
+    parser.add_argument('--find-duplicates', action='store_true',
+                       help='Find and display duplicate video files')
+    parser.add_argument('--validate-db', action='store_true',
+                       help='Validate database integrity')
     
     args = parser.parse_args()
     
-    scanner = VideoArchiveScanner(args.database, args.google_takeout)
+    scanner = VideoArchiveScanner(args.database, args.google_takeout, args.config)
+    
+    # Override config with command line arguments
+    if args.quiet:
+        scanner.config['quiet_mode'] = True
+    if args.dry_run:
+        scanner.config['dry_run'] = True
+    if args.exclude_paths:
+        scanner.config['excluded_directories'].extend(args.exclude_paths)
     
     try:
         if args.scan:
             scan_mode = "GoogleTakeout folders" if args.google_takeout else "all zip files on all drives"
             logger.info(f"Starting drive scan in {scan_mode} mode...")
             scanner.scan_all_drives()
+        elif args.validate_db:
+            issues = scanner.validate_database()
+            if issues:
+                print(f"Database validation found {len(issues)} issues:")
+                for issue in issues:
+                    print(f"  - {issue}")
+            else:
+                print("Database validation passed - no issues found.")
+        elif args.find_duplicates:
+            duplicates = scanner.find_duplicate_videos()
+            if duplicates:
+                print(f"Found {len(duplicates)} sets of duplicate videos:")
+                for dup_group in duplicates:
+                    print(f"\nDuplicate group (hash: {dup_group[0]['hash']}):")
+                    for video in dup_group:
+                        print(f"  - {video['zip_path']} -> {video['file_name']} ({video['file_size']} bytes)")
+            else:
+                print("No duplicate videos found.")
         elif args.search:
             results = scanner.search_videos(args.search, args.regex)
             scanner.print_search_results(results)
+            
+            # Export to CSV if requested
+            if args.export_csv:
+                scanner.export_search_results_to_csv(results, args.export_csv)
         elif args.stats:
             scanner.get_database_stats()
         elif args.drives:

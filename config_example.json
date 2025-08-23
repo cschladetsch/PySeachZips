@@ -1,0 +1,25 @@
+{
+    "video_extensions": [
+        ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v",
+        ".3gp", ".3g2", ".asf", ".divx", ".f4v", ".m2ts", ".mts", ".ogv",
+        ".rm", ".rmvb", ".vob", ".xvid", ".mpg", ".mpeg", ".m1v", ".m2v"
+    ],
+    "excluded_directories": [
+        "System Volume Information", 
+        "$RECYCLE.BIN", 
+        "Windows", 
+        "node_modules", 
+        ".git", 
+        "__pycache__",
+        ".svn",
+        "Thumbs.db"
+    ],
+    "database_path": "./zip_files.db",
+    "batch_size": 1000,
+    "max_memory_mb": 100,
+    "max_workers": 4,
+    "enable_thumbnails": false,
+    "enable_hashing": true,
+    "quiet_mode": false,
+    "dry_run": false
+}

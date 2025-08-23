@@ -131,6 +131,41 @@ This will:
 ./py_zip_scanner.py --database /path/to/custom.db --scan
 ```
 
+### Advanced features
+
+#### Configuration file support
+```bash
+# Create a config.json file based on config_example.json
+./py_zip_scanner.py --config config.json --scan
+```
+
+#### Find duplicate videos
+```bash
+# Find videos with identical content (based on file hash)
+./py_zip_scanner.py --find-duplicates
+```
+
+#### Export search results
+```bash
+# Search and export results to CSV
+./py_zip_scanner.py --search "vacation" --export-csv results.csv
+```
+
+#### Database validation
+```bash
+# Check database integrity and find missing files
+./py_zip_scanner.py --validate-db
+```
+
+#### Quiet and dry-run modes
+```bash
+# Preview what would be scanned without actually scanning
+./py_zip_scanner.py --scan --dry-run
+
+# Run in quiet mode with minimal output
+./py_zip_scanner.py --scan --quiet
+```
+
 ### Command line options
 
 ```bash
@@ -143,16 +178,25 @@ Available options:
 - `--regex`: Use regex patterns for search
 - `--stats`: Show database statistics
 - `--drives`: List indexed drives with statistics
-- `--database PATH`: Specify custom database location
+- `--database PATH`: Specify custom database location (default: zip_files.db)
+- `--config PATH`: Load configuration from JSON file
 - `--google-takeout`: Search only GoogleTakeout folders in root directories (default: enabled)
 - `--no-google-takeout`: Scan all zip files on all drives and folders (overrides default behavior)
+- `--quiet, -q`: Quiet mode - minimal output
+- `--dry-run`: Show what would be scanned without actually scanning
+- `--exclude-paths`: Additional paths to exclude from scanning
+- `--export-csv FILE`: Export search results to CSV file
+- `--find-duplicates`: Find and display duplicate video files
+- `--validate-db`: Validate database integrity
 
 ## Database Schema
 
-The tool creates two main tables:
+The tool creates several tables for enhanced functionality:
 
-- `zip_files`: Stores information about zip archives
-- `file_contents`: Stores metadata for individual video files within archives
+- `zip_files`: Stores ZIP archive metadata including file paths, hashes, and modification dates
+- `file_contents`: Stores video file metadata with hashing for duplicate detection
+- `scan_progress`: Tracks scan progress for resume capability (future feature)
+- `scan_metrics`: Stores scanning statistics and performance metrics
 
 ## Platform Support
 
@@ -172,4 +216,6 @@ The tool provides colored terminal output with:
 
 - `py_zip_scanner.py`: Main scanner application
 - `test_drives.py`: Test script for drive detection functionality
-- `google_takeout_videos.db`: SQLite database (created automatically)
+- `config_example.json`: Example configuration file
+- `zip_files.db`: SQLite database (created automatically)
+- `REVIEW.md`: Code review and usage summary
