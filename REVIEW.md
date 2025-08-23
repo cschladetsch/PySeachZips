@@ -31,6 +31,12 @@
 
 **Code quality**: Follows Python best practices with comprehensive documentation, consistent error handling, and modular architecture.
 
+**Recent Improvements:**
+- **Cross-platform path resolution**: Fixed WSL/Windows path handling with proper conversion functions
+- **Interactive extraction workflows**: Smart selection menus with progress feedback and error recovery
+- **Performance optimization**: Efficient database queries with proper connection management
+- **User experience**: Comprehensive help text, colored output, and intuitive command structure
+
 ## Usage Summary
 
 **PySearchZips** is a high-performance Python tool that scans drives to build a searchable database of files contained within ZIP archives, with powerful extraction capabilities. It operates in multiple modes:
