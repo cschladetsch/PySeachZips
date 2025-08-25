@@ -6,6 +6,12 @@ A high-performance Python tool for scanning and indexing files within ZIP archiv
 
 ![Demo](resources/Demo.jpg)
 
+---
+
+Threaded
+
+![Demo](resources/Threaded.jpg)
+
 ## Features
 
 ### Performance & Scanning
