@@ -10,8 +10,10 @@ import logging
 import os
 import sys
 import time
+import threading
 from pathlib import Path
 from typing import List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import our modules
 from database import DatabaseManager
@@ -42,6 +44,10 @@ class PySearchZips:
         self.drive_scanner = DriveScanner(self.config)
         self.zip_scanner = ZipFileScanner(self.config)
         self.progress = ProgressDisplay()
+        
+        # Thread synchronization
+        self.db_lock = threading.Lock()
+        self.console_lock = threading.Lock()
         
         # Configuration flags
         self.root_folders_only = self.config.get('google_takeout_mode', True)
@@ -85,8 +91,71 @@ class PySearchZips:
         
         return default_config
     
-    def scan_drives(self):
-        """Scan all available drives for ZIP files"""
+    def scan_drives(self, use_threading: bool = True, compare_methods: bool = False):
+        """Scan all available drives for ZIP files with threading support"""
+        if compare_methods:
+            print(f"{Style.BRIGHT}{Fore.CYAN}PERFORMANCE COMPARISON MODE{Style.RESET_ALL}")
+            print("Running both sequential and threaded scans for comparison...")
+            print(f"{Fore.YELLOW}Note: Using temporary databases to avoid conflicts{Style.RESET_ALL}\n")
+            
+            import tempfile
+            
+            # Create temporary databases for comparison
+            temp_db_sequential = tempfile.mktemp(suffix='_sequential.db')
+            temp_db_threaded = tempfile.mktemp(suffix='_threaded.db')
+            
+            try:
+                # Run sequential first
+                print(f"{Style.BRIGHT}{Fore.YELLOW}=== SEQUENTIAL SCAN ==={Style.RESET_ALL}")
+                temp_scanner_seq = PySearchZips(temp_db_sequential, None)
+                temp_scanner_seq.root_folders_only = self.root_folders_only
+                temp_scanner_seq.all_files_mode = self.all_files_mode
+                temp_scanner_seq.quiet_mode = self.quiet_mode
+                
+                start_seq = time.time()
+                temp_scanner_seq.scan_drives_sequential()
+                seq_time = time.time() - start_seq
+                temp_scanner_seq.close()
+                
+                print(f"\n{Style.BRIGHT}{Fore.YELLOW}=== THREADED SCAN ==={Style.RESET_ALL}")
+                temp_scanner_threaded = PySearchZips(temp_db_threaded, None)
+                temp_scanner_threaded.root_folders_only = self.root_folders_only
+                temp_scanner_threaded.all_files_mode = self.all_files_mode
+                temp_scanner_threaded.quiet_mode = self.quiet_mode
+                
+                start_threaded = time.time()
+                temp_scanner_threaded.scan_drives_threaded()
+                threaded_time = time.time() - start_threaded
+                temp_scanner_threaded.close()
+                
+                # Show comparison
+                print(f"\n{Style.BRIGHT}{Fore.CYAN}PERFORMANCE COMPARISON RESULTS{Style.RESET_ALL}")
+                print(f"   Sequential time: {Fore.YELLOW}{seq_time:.1f}s{Style.RESET_ALL}")
+                print(f"   Threaded time: {Fore.YELLOW}{threaded_time:.1f}s{Style.RESET_ALL}")
+                if seq_time > 0 and threaded_time > 0:
+                    speedup = seq_time / threaded_time
+                    print(f"   Speedup: {Fore.GREEN}{speedup:.2f}x{Style.RESET_ALL}")
+                    
+                    if speedup > 1.5:
+                        print(f"   {Fore.GREEN}✓ Threading provides significant performance improvement!{Style.RESET_ALL}")
+                    elif speedup > 1.1:
+                        print(f"   {Fore.YELLOW}~ Threading provides moderate performance improvement{Style.RESET_ALL}")
+                    else:
+                        print(f"   {Fore.RED}⚠ Threading overhead may be limiting benefits{Style.RESET_ALL}")
+                
+            finally:
+                # Clean up temporary databases
+                for temp_db in [temp_db_sequential, temp_db_threaded]:
+                    if os.path.exists(temp_db):
+                        os.unlink(temp_db)
+                        print(f"   {Fore.GREEN}Cleaned up: {os.path.basename(temp_db)}{Style.RESET_ALL}")
+        elif use_threading:
+            self.scan_drives_threaded()
+        else:
+            self.scan_drives_sequential()
+
+    def scan_drives_sequential(self):
+        """Scan all available drives for ZIP files sequentially (original method)"""
         drives = self.drive_scanner.get_available_drives()
         logger.info(f"Found {len(drives)} available drives: {drives}")
         
@@ -252,6 +321,227 @@ class PySearchZips:
             print(f"\n{Fore.GREEN}   Processed {total_zips} zip files, found {total_videos:,} videos")
         else:
             print(f"\n{Fore.YELLOW}   No video files found in {total_zips} zip files")
+        
+        return total_zips, total_videos
+    
+    def scan_drives_threaded(self):
+        """Scan all available drives for ZIP files using threading (one thread per drive)"""
+        drives = self.drive_scanner.get_available_drives()
+        logger.info(f"Found {len(drives)} available drives: {drives}")
+        
+        # Get initial database state
+        initial_stats = self.db.get_database_summary()
+        
+        print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.CYAN}DATABASE STATUS (BEFORE THREADED SCAN){Style.RESET_ALL}")
+        print(f"   Drives indexed: {Fore.YELLOW}{initial_stats['drives']}{Style.RESET_ALL}")
+        print(f"   Zip files: {Fore.YELLOW}{initial_stats['zip_files']}{Style.RESET_ALL}")
+        print(f"   Video files: {Fore.YELLOW}{initial_stats['video_files']:,}{Style.RESET_ALL}")
+        print(f"   Total size: {Fore.YELLOW}{initial_stats['total_size_gb']:.2f} GB{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        
+        scan_mode_desc = "GoogleTakeout folders only" if self.root_folders_only else "all zip files on drives"
+        print(f"\n{Style.BRIGHT}{Fore.WHITE}Starting THREADED scan of {len(drives)} drives ({scan_mode_desc})...{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Drive scan order: {', '.join(drives)}{Style.RESET_ALL}")
+        
+        start_time = time.time()
+        
+        # Create temporary database files for each thread
+        temp_db_files = []
+        for i, drive in enumerate(drives):
+            temp_db_path = f"{self.database_path}.thread_{i}_{drive.replace('/', '_').replace(':', '_')}.tmp"
+            temp_db_files.append(temp_db_path)
+        
+        # Use ThreadPoolExecutor to scan drives in parallel
+        drive_results = {}
+        thread_db_files = []
+        
+        with ThreadPoolExecutor(max_workers=len(drives)) as executor:
+            # Submit all drive scan jobs with their own database files
+            future_to_drive = {}
+            for i, drive in enumerate(drives):
+                temp_db_path = temp_db_files[i]
+                future = executor.submit(self._scan_single_drive_threaded, drive, temp_db_path)
+                future_to_drive[future] = (drive, temp_db_path)
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_drive):
+                drive, temp_db_path = future_to_drive[future]
+                try:
+                    drive_zips, drive_videos = future.result()
+                    drive_results[drive] = (drive_zips, drive_videos)
+                    if os.path.exists(temp_db_path):
+                        thread_db_files.append(temp_db_path)
+                except Exception as exc:
+                    logger.error(f'Drive {drive} generated an exception: {exc}')
+                    drive_results[drive] = (0, 0)
+        
+        # Merge all thread databases into the main database
+        if thread_db_files:
+            print(f"\n{Style.BRIGHT}{Fore.WHITE}Merging thread databases...{Style.RESET_ALL}")
+            
+            def merge_progress_callback(msg):
+                print(f"{Fore.CYAN}[MERGE] {msg}{Style.RESET_ALL}")
+            
+            self.db.merge_databases(thread_db_files, merge_progress_callback)
+            
+            # Clean up temporary database files
+            for temp_db_path in thread_db_files:
+                try:
+                    os.unlink(temp_db_path)
+                    print(f"{Fore.GREEN}[CLEANUP] Removed {os.path.basename(temp_db_path)}{Style.RESET_ALL}")
+                except Exception as e:
+                    logger.warning(f"Could not remove temporary database {temp_db_path}: {e}")
+        
+        # Calculate totals
+        total_zips = sum(result[0] for result in drive_results.values())
+        total_videos = sum(result[1] for result in drive_results.values())
+        
+        elapsed_time = time.time() - start_time
+        minutes, seconds = divmod(elapsed_time, 60)
+        
+        # Get final database state
+        final_stats = self.db.get_database_summary()
+        
+        # Final summary
+        print(f"\n{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.GREEN}THREADED SCAN COMPLETE!{Style.RESET_ALL}")
+        print(f"   Time elapsed: {Fore.YELLOW}{int(minutes):02d}:{int(seconds):02d}{Style.RESET_ALL}")
+        print(f"   Zip files processed: {Fore.YELLOW}{total_zips}{Style.RESET_ALL}")
+        print(f"   Video files found: {Fore.YELLOW}{total_videos:,}{Style.RESET_ALL}")
+        
+        print(f"\n{Style.BRIGHT}{Fore.CYAN}DATABASE STATUS (AFTER THREADED SCAN){Style.RESET_ALL}")
+        print(f"   Total drives indexed: {Fore.YELLOW}{final_stats['drives']}{Style.RESET_ALL}")
+        print(f"   Total zip files: {Fore.YELLOW}{final_stats['zip_files']}{Style.RESET_ALL}")
+        print(f"   Total video files: {Fore.YELLOW}{final_stats['video_files']:,}{Style.RESET_ALL}")
+        print(f"   Total size: {Fore.YELLOW}{final_stats['total_size_gb']:.2f} GB{Style.RESET_ALL}")
+        print(f"{Style.BRIGHT}{Fore.WHITE}{'='*70}{Style.RESET_ALL}")
+    
+    def _scan_single_drive_threaded(self, drive: str, thread_db_path: str) -> tuple:
+        """Thread-safe version of _scan_single_drive using separate database file"""
+        drive_colors = [Fore.GREEN, Fore.BLUE, Fore.MAGENTA, Fore.CYAN, Fore.YELLOW]
+        drive_index = hash(drive) % len(drive_colors)
+        drive_color = drive_colors[drive_index]
+        
+        # Create separate database manager for this thread
+        thread_db = DatabaseManager(thread_db_path)
+        
+        label, size_gb = self.drive_scanner.get_drive_info(drive)
+        mode_str = "GoogleTakeout mode" if self.root_folders_only else "all zip files"
+        
+        with self.console_lock:
+            print(f"\n{drive_color}[THREAD] Scanning drive ({mode_str}): {drive} [{label}, {size_gb:.1f} GB]{Style.RESET_ALL}")
+            print(f"{drive_color}[THREAD] Using database: {os.path.basename(thread_db_path)}{Style.RESET_ALL}")
+        
+        total_zips = 0
+        total_videos = 0
+        
+        if self.root_folders_only:
+            # GoogleTakeout mode
+            with self.console_lock:
+                print(f"{drive_color}[THREAD] Searching for GoogleTakeout folders on {drive}...{Style.RESET_ALL}")
+            
+            takeout_folders = list(self.drive_scanner.find_google_takeout_folders([drive]))
+            
+            if not takeout_folders:
+                with self.console_lock:
+                    print(f"{drive_color}[THREAD] No GoogleTakeout folders found on {drive}{Style.RESET_ALL}")
+                return 0, 0
+            
+            # Process each GoogleTakeout folder
+            for takeout_path, folder_count in takeout_folders:
+                with self.console_lock:
+                    print(f"{drive_color}[THREAD] Found GoogleTakeout: {os.path.basename(takeout_path)}{Style.RESET_ALL}")
+                
+                zip_files = [f for f in os.listdir(takeout_path) 
+                           if f.lower().endswith('.zip') and os.path.isfile(os.path.join(takeout_path, f))]
+                
+                with self.console_lock:
+                    print(f"{drive_color}[THREAD] Found {len(zip_files)} zip files to process{Style.RESET_ALL}")
+                
+                drive_zips, drive_videos = self._process_zip_files_threaded(
+                    [os.path.join(takeout_path, f) for f in zip_files],
+                    drive, drive_color, len(zip_files), thread_db
+                )
+                total_zips += drive_zips
+                total_videos += drive_videos
+        else:
+            # All zip files mode
+            with self.console_lock:
+                print(f"{drive_color}[THREAD] Finding all zip files on {drive}...{Style.RESET_ALL}")
+            
+            all_zips = list(self.drive_scanner.find_all_zip_files_on_drive(drive))
+            
+            with self.console_lock:
+                print(f"{drive_color}[THREAD] Found {len(all_zips)} zip files to process{Style.RESET_ALL}")
+            
+            total_zips, total_videos = self._process_zip_files_threaded(
+                all_zips, drive, drive_color, len(all_zips), thread_db
+            )
+        
+        # Close the thread database
+        thread_db.close()
+        
+        with self.console_lock:
+            if total_videos > 0:
+                print(f"{drive_color}[THREAD] {drive} COMPLETE: {total_zips} zip files, {total_videos:,} videos{Style.RESET_ALL}")
+            else:
+                print(f"{drive_color}[THREAD] {drive} COMPLETE: No video files found in {total_zips} zip files{Style.RESET_ALL}")
+        
+        return total_zips, total_videos
+    
+    def _process_zip_files_threaded(self, zip_files: List[str], drive: str, drive_color: str, 
+                                  total_files: int, thread_db: DatabaseManager) -> tuple:
+        """Thread-safe version of _process_zip_files using separate database"""
+        total_zips = 0
+        total_videos = 0
+        
+        for i, zip_path in enumerate(zip_files):
+            zip_name = os.path.basename(zip_path)
+            if len(zip_name) > 35:
+                zip_name = zip_name[:32] + "..."
+            
+            # Get file size
+            try:
+                zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+                size_str = f"({zip_size_mb:.1f} MB)"
+            except:
+                size_str = "(size unknown)"
+            
+            with self.console_lock:
+                print(f"{drive_color}[THREAD][{drive:<8}] Processing: {zip_name} {size_str}{Style.RESET_ALL}", flush=True)
+            
+            # Progress callback for ZIP scanning
+            def zip_progress_callback(status_msg):
+                with self.console_lock:
+                    print(f"{drive_color}[THREAD][{drive:<8}] {status_msg}{Style.RESET_ALL}", flush=True)
+            
+            # Scan ZIP file
+            video_files = self.zip_scanner.scan_zip_for_videos(
+                zip_path, self.all_files_mode, zip_progress_callback
+            )
+            
+            if video_files:
+                with self.console_lock:
+                    print(f"{drive_color}[THREAD][{drive:<8}] Inserting {len(video_files)} files from {zip_name}{Style.RESET_ALL}", flush=True)
+                
+                # Thread-safe database insertion
+                def db_heartbeat_callback(status_msg):
+                    with self.console_lock:
+                        print(f"{drive_color}[THREAD][{drive:<8}] {status_msg}{Style.RESET_ALL}", flush=True)
+                
+                drive_letter = self.drive_scanner.get_drive_letter(zip_path)
+                
+                # Use thread-specific database (no lock needed)
+                thread_db.insert_zip_data(zip_path, video_files, db_heartbeat_callback, drive_letter)
+                
+                total_zips += 1
+                total_videos += len(video_files)
+            
+            # Show progress
+            progress_pct = ((i + 1) / total_files) * 100
+            with self.console_lock:
+                print(f"{drive_color}[THREAD][{drive:<8}] Progress: {progress_pct:.1f}% ({i + 1}/{total_files}){Style.RESET_ALL}")
         
         return total_zips, total_videos
     
@@ -612,6 +902,12 @@ def main():
                        help='Scan all file types, not just videos')
     parser.add_argument('--quiet', '-q', action='store_true',
                        help='Quiet mode - minimal output')
+    parser.add_argument('--compare-threaded', action='store_true',
+                       help='Run both sequential and threaded scans for performance comparison')
+    parser.add_argument('--sequential', action='store_true',
+                       help='Use sequential scanning instead of threaded (default is threaded)')
+    parser.add_argument('--test-threading', choices=['quick', 'comprehensive', 'stress'],
+                       help='Run simulated tests: quick (default), comprehensive (multiple configs), or stress (multiple iterations)')
     
     # Search filters
     parser.add_argument('--min-size', type=int,
@@ -637,7 +933,10 @@ def main():
     
     try:
         if args.scan:
-            scanner.scan_drives()
+            # Determine threading mode
+            use_threading = not args.sequential  # Default is threaded unless --sequential is used
+            compare_methods = args.compare_threaded
+            scanner.scan_drives(use_threading=use_threading, compare_methods=compare_methods)
         elif args.search:
             scanner.search_files(args.search, args.regex, args.min_size, 
                                args.max_size, args.file_types)
@@ -654,6 +953,29 @@ def main():
         elif args.extract_all:
             resolved_dir = resolve_output_path(args.output_dir)
             scanner.extract_all_files(resolved_dir)
+        elif args.test_threading:
+            # Import and run threading tests
+            try:
+                from test_threading import ThreadingTester, run_quick_test, run_comprehensive_test
+                
+                if args.test_threading == 'quick':
+                    print(f"{Style.BRIGHT}{Fore.CYAN}Running quick threading test...{Style.RESET_ALL}")
+                    run_quick_test()
+                elif args.test_threading == 'comprehensive':
+                    print(f"{Style.BRIGHT}{Fore.CYAN}Running comprehensive threading tests...{Style.RESET_ALL}")
+                    run_comprehensive_test()
+                elif args.test_threading == 'stress':
+                    print(f"{Style.BRIGHT}{Fore.CYAN}Running stress test...{Style.RESET_ALL}")
+                    tester = ThreadingTester()
+                    try:
+                        tester.run_stress_test(num_drives=6, num_iterations=3)
+                    finally:
+                        tester.cleanup()
+                        
+            except ImportError as e:
+                print(f"{Fore.RED}Error: Could not import test_threading module: {e}{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}Error running tests: {e}{Style.RESET_ALL}")
         elif args.stats:
             scanner.show_stats()
         else:

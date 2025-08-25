@@ -87,7 +87,7 @@ class DatabaseManager:
     
     def insert_zip_data(self, zip_path: str, video_files: List[Tuple[str, int, str, Optional[str]]], 
                        heartbeat_callback=None, drive_letter: str = None) -> str:
-        """Insert zip file and its video files into the database"""
+        """Insert zip file and its video files into the database with thread safety"""
         if not video_files:
             return None
         
@@ -108,38 +108,43 @@ class DatabaseManager:
         except OSError as e:
             logger.warning(f"Could not get metadata for {zip_path}: {e}")
         
-        cursor = self.connection.cursor()
+        # Use thread-safe connection
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
         
-        if heartbeat_callback:
-            heartbeat_callback("Inserting ZIP metadata...")
-        
-        # Insert zip file record
-        cursor.execute('''
-            INSERT INTO zip_files (drive_letter, zip_file_name, zip_file_path, uuid, 
-                                 file_size, file_hash, last_modified, scan_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (drive_letter or "", zip_file_name, zip_path, zip_uuid, 
-              zip_file_size, None, zip_last_modified, datetime.now()))
-        
-        if heartbeat_callback:
-            heartbeat_callback(f"Inserting {len(video_files)} file records...")
-        
-        # Batch insert video files
-        video_data = []
-        for file_name, file_size, file_path_in_zip, file_hash in video_files:
-            video_data.append((zip_uuid, file_name, file_size, file_path_in_zip, file_hash, datetime.now()))
-        
-        cursor.executemany('''
-            INSERT INTO file_contents (zip_uuid, file_name, file_size, file_path_in_zip, file_hash, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', video_data)
-        
-        if heartbeat_callback:
-            heartbeat_callback("Committing transaction...")
-        
-        self.connection.commit()
-        logger.info(f"Inserted {len(video_files)} video files from {zip_file_name}")
-        return zip_uuid
+        try:
+            if heartbeat_callback:
+                heartbeat_callback("Inserting ZIP metadata...")
+            
+            # Insert zip file record
+            cursor.execute('''
+                INSERT INTO zip_files (drive_letter, zip_file_name, zip_file_path, uuid, 
+                                     file_size, file_hash, last_modified, scan_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (drive_letter or "", zip_file_name, zip_path, zip_uuid, 
+                  zip_file_size, None, zip_last_modified, datetime.now()))
+            
+            if heartbeat_callback:
+                heartbeat_callback(f"Inserting {len(video_files)} file records...")
+            
+            # Batch insert video files
+            video_data = []
+            for file_name, file_size, file_path_in_zip, file_hash in video_files:
+                video_data.append((zip_uuid, file_name, file_size, file_path_in_zip, file_hash, datetime.now()))
+            
+            cursor.executemany('''
+                INSERT INTO file_contents (zip_uuid, file_name, file_size, file_path_in_zip, file_hash, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', video_data)
+            
+            if heartbeat_callback:
+                heartbeat_callback("Committing transaction...")
+            
+            conn.commit()
+            logger.info(f"Inserted {len(video_files)} video files from {zip_file_name}")
+            return zip_uuid
+        finally:
+            conn.close()
     
     def get_database_summary(self):
         """Get current database summary with thread-safe connection"""
@@ -333,6 +338,69 @@ class DatabaseManager:
             
             cursor.execute(query)
             return cursor.fetchall()
+        finally:
+            conn.close()
+    
+    def merge_databases(self, source_db_paths: List[str], progress_callback=None):
+        """Merge multiple database files into this database"""
+        if not source_db_paths:
+            return
+        
+        if progress_callback:
+            progress_callback(f"Merging {len(source_db_paths)} database files...")
+        
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        
+        try:
+            for i, source_db_path in enumerate(source_db_paths):
+                if not os.path.exists(source_db_path):
+                    logger.warning(f"Source database not found: {source_db_path}")
+                    continue
+                
+                if progress_callback:
+                    progress_callback(f"Merging database {i+1}/{len(source_db_paths)}: {os.path.basename(source_db_path)}")
+                
+                # Use a separate connection to read from source database
+                source_conn = sqlite3.connect(source_db_path)
+                source_cursor = source_conn.cursor()
+                
+                try:
+                    # Read zip_files data from source
+                    source_cursor.execute("SELECT * FROM zip_files")
+                    zip_files_data = source_cursor.fetchall()
+                    
+                    # Insert into main database
+                    cursor.executemany("""
+                        INSERT OR IGNORE INTO zip_files 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, zip_files_data)
+                    
+                    # Read file_contents data from source
+                    source_cursor.execute("SELECT * FROM file_contents")
+                    file_contents_data = source_cursor.fetchall()
+                    
+                    # Insert into main database
+                    cursor.executemany("""
+                        INSERT OR IGNORE INTO file_contents 
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, file_contents_data)
+                    
+                finally:
+                    source_conn.close()
+                
+                if progress_callback:
+                    progress_callback(f"Merged {os.path.basename(source_db_path)} successfully")
+            
+            conn.commit()
+            
+            if progress_callback:
+                progress_callback("Database merge complete!")
+                
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error merging databases: {e}")
+            raise
         finally:
             conn.close()
     
